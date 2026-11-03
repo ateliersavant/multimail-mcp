@@ -116,6 +116,7 @@ The change applies to the next request. To cut a mailbox off at Google's side as
 | MCP requests per client token | 120 per minute | `src/guard/ratelimit.ts` (`MCP_RATE_LIMIT_PER_MINUTE` overrides, 5 to 10 000) |
 | Drafts created or updated per principal | 120 per hour | `src/guard/ratelimit.ts` |
 | Emails sent per principal, all mailboxes together | 20 per hour, 100 per day | `src/guard/ratelimit.ts` |
+| Label, archive and Trash changes per principal | 300 per hour | `src/guard/ratelimit.ts` |
 | Client registrations per source address | 10 per hour | `src/oauth/client-policy.ts` (`REGISTER_RATE_LIMIT_PER_HOUR` overrides, 1 to 1 000) |
 
 A client over its limit gets HTTP 429 with `Retry-After`; an over-limit send is refused before Gmail is called and the draft stays unchanged. Every refusal is in the audit log as `rate_limited`.

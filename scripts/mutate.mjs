@@ -382,6 +382,52 @@ const MUTATIONS = [
     replace: "throw new TenantConfigError([`$: not valid JSON (${jsonText.slice(0, 40)})`]);",
     projects: ["unit"],
   },
+  // Phase 2 organising tools: labels, archive, Trash.
+  {
+    // TRASH, SPAM, SENT, DRAFT and CHAT are never changed through modify_labels.
+    id: "organise-label-not-allowed",
+    file: "src/mcp/tools/organise.ts",
+    find: 'if (why !== undefined) throw new OrganiseRefusal("label_not_allowed",',
+    replace: 'if (false) throw new OrganiseRefusal("label_not_allowed",',
+    projects: ["unit"],
+  },
+  {
+    // Labels must exist in the mailbox; nothing is created or guessed.
+    id: "organise-unknown-label",
+    file: "src/mcp/tools/organise.ts",
+    find: 'if (found === undefined) throw new OrganiseRefusal("unknown_label",',
+    replace: 'if (found === undefined) continue; if (false) throw new OrganiseRefusal("unknown_label",',
+    projects: ["unit"],
+  },
+  {
+    id: "organise-single-target",
+    file: "src/mcp/tools/organise.ts",
+    find: "if ((input.thread_id === undefined) === (input.message_id === undefined))",
+    replace: "if (input.thread_id === undefined && input.message_id === undefined)",
+    projects: ["unit"],
+  },
+  {
+    // A label change is confirmed by reading it back, never inferred from Gmail accepting it.
+    id: "organise-confirm-labels",
+    file: "src/mcp/tools/organise.ts",
+    find: "const confirmed = after.length > 0 && after.every((l) => add.every((a) => l.includes(a.id)) && remove.every((r) => !l.includes(r.id)));",
+    replace: "const confirmed = true;",
+    projects: ["unit"],
+  },
+  {
+    id: "organise-confirm-trash",
+    file: "src/mcp/tools/organise.ts",
+    find: 'const confirmed = after.length > 0 && after.every((l) => (action === "trash" ? l.includes("TRASH") : !l.includes("TRASH")));',
+    replace: "const confirmed = true;",
+    projects: ["unit"],
+  },
+  {
+    id: "organise-rate-limit",
+    file: "src/mcp/tools/organise.ts",
+    find: 'if (!d.allowed) throw new OrganiseRefusal("rate_limited",',
+    replace: 'if (false) throw new OrganiseRefusal("rate_limited",',
+    projects: ["unit"],
+  },
 ];
 
 const only = process.argv.slice(2);

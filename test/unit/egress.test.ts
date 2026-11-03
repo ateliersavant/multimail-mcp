@@ -19,16 +19,22 @@ describe("egress allowlist", () => {
       ["PUT", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/r-123"],
       ["DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/r-123"],
       ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/drafts/send"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f/modify"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2f/modify"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f/trash"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f/untrash"],
     ];
     for (const [m, u] of allowed) expect(() => assertEgressAllowed(new URL(u), GOOGLE_EGRESS, m), `${m} ${u}`).not.toThrow();
   });
 
-  it("denies everything else gmail.modify could do: direct send, trash, label changes, other methods", () => {
+  it("denies everything else gmail.modify could do: direct send, per-message trash, bulk changes, deletes, other methods", () => {
     const denied: [string, string][] = [
       ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"],
       ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2f/trash"],
-      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2f/modify"],
-      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f/modify"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify"],
+      ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/batchDelete"],
+      ["DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f"],
+      ["GET", "https://gmail.googleapis.com/gmail/v1/users/me/threads/18c2f/trash"],
       ["DELETE", "https://gmail.googleapis.com/gmail/v1/users/me/messages/18c2f"],
       ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/messages/import"],
       ["POST", "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs"],

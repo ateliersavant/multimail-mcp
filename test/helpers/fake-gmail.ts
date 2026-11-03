@@ -225,8 +225,14 @@ export class FakeGoogle {
   rewriteFromToPrimary = false;
   /** Simulates Gmail not (yet) labelling a sent message SENT. */
   omitSentLabel = false;
+  /** Simulates Gmail accepting a label or Trash change without applying it. */
+  ignoreLabelChanges = false;
+  /** Simulates reading a thread or message back failing (503) after a change. */
+  failReadBack = false;
   /** Every message Gmail sent, in order. */
   readonly sentLog: SentLogEntry[] = [];
+  /** Current labels per stored message, `${address}|${messageId}`, seeded from the spec on first use. */
+  private readonly labelState = new Map<string, string[]>();
   private readonly tokens = new Map<string, string>(); // token -> impersonated mailbox
   private issued = 0;
   private readonly sendAsLists = new Map<string, FakeSendAs[]>();
@@ -287,6 +293,22 @@ export class FakeGoogle {
     const part = (type: string, body: string): string[] => [`Content-Type: ${type}; charset=UTF-8`, "Content-Transfer-Encoding: base64", "", b64(body)];
     const mime = [...keep, 'Content-Type: multipart/alternative; boundary="FAKE-ALT"', "", "--FAKE-ALT", ...part("text/plain", p.text ?? ""), "--FAKE-ALT", ...part("text/html", html), "--FAKE-ALT--", ""].join("\r\n");
     d.raw = b64urlEncode(utf8(mime));
+  }
+
+  private labelsOf(address: string, spec: FakeMessageSpec): string[] {
+    const k = `${address}|${spec.id}`;
+    let l = this.labelState.get(k);
+    if (l === undefined) {
+      l = [...(spec.labelIds ?? ["INBOX"])];
+      this.labelState.set(k, l);
+    }
+    return l;
+  }
+
+  /** The labels a stored message carries now. */
+  messageLabels(address: string, messageId: string): string[] | undefined {
+    const spec = this.data[address]?.messages.find((s) => s.id === messageId);
+    return spec === undefined ? undefined : [...this.labelsOf(address, spec)];
   }
 
   get tokensIssued(): number {
@@ -353,6 +375,33 @@ export class FakeGoogle {
     const write = this.gmailWrite(address, rest, method, bodyText, url);
     if (write !== undefined) return write;
     if (rest === "labels") return json({ labels: box.labels });
+    const change = /^(threads|messages)\/([^/?]+)\/(modify|trash|untrash)$/.exec(rest);
+    if (change !== null) {
+      if (method !== "POST") return json({ error: { code: 405, status: "METHOD_NOT_ALLOWED" } }, 405);
+      const id = decodeURIComponent(change[2] as string);
+      const specs = change[1] === "threads" ? (this.threads(box).get(id) ?? []) : box.messages.filter((s) => s.id === id);
+      if (specs.length === 0 || (change[1] === "messages" && change[3] !== "modify")) return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
+      let add: string[] = [];
+      let remove: string[] = [];
+      if (change[3] === "modify") {
+        const body = JSON.parse(bodyText === "" ? "{}" : bodyText) as { addLabelIds?: string[]; removeLabelIds?: string[] };
+        add = body.addLabelIds ?? [];
+        remove = body.removeLabelIds ?? [];
+        const known = new Set(box.labels.map((l) => l.id));
+        if ([...add, ...remove].some((l) => !known.has(l))) return json({ error: { code: 400, status: "INVALID_ARGUMENT" } }, 400);
+      } else if (change[3] === "trash") add = ["TRASH"];
+      else remove = ["TRASH"];
+      if (!this.ignoreLabelChanges) {
+        for (const s of specs) {
+          const cur = this.labelsOf(address, s);
+          for (const l of add) if (!cur.includes(l)) cur.push(l);
+          for (const l of remove) if (cur.includes(l)) cur.splice(cur.indexOf(l), 1);
+        }
+      }
+      const ref = (s: FakeMessageSpec): Json => ({ id: s.id, threadId: s.threadId, labelIds: [...this.labelsOf(address, s)] });
+      return json(change[1] === "threads" ? { id, messages: specs.map(ref) } : ref(specs[0] as FakeMessageSpec));
+    }
+    if (this.failReadBack && /^(threads|messages)\/[^/?]+$/.test(rest)) return json({ error: { code: 503, status: "UNAVAILABLE" } }, 503);
     if (rest === "threads") {
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
       const max = Number(url.searchParams.get("maxResults") ?? "100");
@@ -379,7 +428,7 @@ export class FakeGoogle {
       const format = url.searchParams.get("format") ?? "full";
       const wanted = url.searchParams.getAll("metadataHeaders").map((h) => h.toLowerCase());
       const messages = msgs.map((s) => {
-        const full = gmailMessage(s);
+        const full: Json = { ...gmailMessage(s), labelIds: [...this.labelsOf(address, s)] };
         if (format !== "metadata") return full;
         const payload = full["payload"] as { headers: { name: string; value: string }[] };
         const headers = payload.headers.filter((h) => wanted.length === 0 || wanted.includes(h.name.toLowerCase()));
@@ -396,7 +445,7 @@ export class FakeGoogle {
       const spec = box.messages.find((s) => s.id === id);
       const sent = this.sent.get(address)?.get(id);
       let full: Json;
-      if (spec !== undefined) full = gmailMessage(spec);
+      if (spec !== undefined) full = { ...gmailMessage(spec), labelIds: [...this.labelsOf(address, spec)] };
       else if (sent !== undefined) full = { id: sent.id, threadId: sent.threadId, labelIds: [...sent.labelIds], snippet: "", historyId: "1", internalDate: String(sent.internalDate), sizeEstimate: 1000, payload: sent.payload };
       else return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
       if (format === "metadata") return json({ ...full, payload: metadataOf(full["payload"] as Json, wanted) });
@@ -504,6 +553,10 @@ export function sampleMailboxes(): Record<string, FakeMailboxData> {
       labels: [
         { id: "INBOX", name: "INBOX", type: "system" },
         { id: "SENT", name: "SENT", type: "system" },
+        { id: "UNREAD", name: "UNREAD", type: "system" },
+        { id: "STARRED", name: "STARRED", type: "system" },
+        { id: "TRASH", name: "TRASH", type: "system" },
+        { id: "SPAM", name: "SPAM", type: "system" },
         { id: "Label_7", name: "Clients", type: "user" },
       ],
       sendAs: [

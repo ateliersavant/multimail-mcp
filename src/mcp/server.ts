@@ -6,6 +6,7 @@ import type { GmailClient } from "../gmail/client.js";
 import type { SendLedger } from "../gmail/ledger.js";
 import type { Limits, RateLimiter } from "../guard/ratelimit.js";
 import { UNTRUSTED_NOTE, type McpIdentity } from "./identity.js";
+import { registerOrganiseTools } from "./tools/organise.js";
 import { registerReadTools } from "./tools/read.js";
 import { registerWriteTools } from "./tools/write.js";
 
@@ -18,7 +19,8 @@ export const SERVER_INSTRUCTIONS = [
   "3. Sending is draft-then-send: create_draft, show the human the full draft, and call send_draft only after they explicitly approve it. There is no direct send.",
   "4. The From must be one of the mailbox's send-as addresses from list_accounts; check_send_as shows which ones Gmail accepts. Reply from the mailbox that received the message.",
   "5. After send_draft, report its status exactly: sent_confirmed, sent_unconfirmed (never resend) or failed (nothing sent).",
-  `6. ${UNTRUSTED_NOTE}`,
+  "6. Change labels, archive or move to Trash only when the user asked for it. Trash is reversible for 30 days with untrash_thread; nothing is deleted permanently.",
+  `7. ${UNTRUSTED_NOTE}`,
 ].join("\n");
 
 const PublicMailbox = z.object({ address: z.string(), sendAs: z.array(z.string()) });
@@ -73,6 +75,15 @@ export function buildMcpServer(cfg: AppConfig, identity: McpIdentity, deps: McpS
     audit: deps.audit,
     identity,
     ...(deps.ledger !== undefined ? { ledger: deps.ledger } : {}),
+    ...(deps.rateLimiter !== undefined ? { rateLimiter: deps.rateLimiter } : {}),
+    ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
+    ...clock,
+  });
+  registerOrganiseTools(server, {
+    registry: cfg.registry,
+    gmail: deps.gmail,
+    audit: deps.audit,
+    identity,
     ...(deps.rateLimiter !== undefined ? { rateLimiter: deps.rateLimiter } : {}),
     ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
     ...clock,

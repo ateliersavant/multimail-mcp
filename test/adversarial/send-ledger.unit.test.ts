@@ -6,7 +6,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { MemorySendLedger, type SendLedger } from "../../src/gmail/ledger.js";
 import { STUDIO_ADA } from "../helpers/fake-gmail.js";
-import { NOW, harness, text, type Harness } from "./harness.js";
+import { NOW, harness, text, type Harness } from "../helpers/mcp-harness.js";
 
 let h: Harness | undefined;
 afterEach(async () => {

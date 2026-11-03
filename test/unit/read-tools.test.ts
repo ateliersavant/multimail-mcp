@@ -81,7 +81,7 @@ afterEach(async () => {
 describe("tool surface", () => {
   it("lists the four read tools after list_accounts, then the draft tools; read tools are read-only, require `account` and warn about untrusted content", async () => {
     const { tools } = await h.client.listTools();
-    expect(tools.map((t) => t.name)).toEqual(["list_accounts", ...READ_TOOLS, "create_draft", "update_draft", "get_draft", "list_drafts", "delete_draft", "send_draft", "check_send_as"]);
+    expect(tools.map((t) => t.name)).toEqual(["list_accounts", ...READ_TOOLS, "create_draft", "update_draft", "get_draft", "list_drafts", "delete_draft", "send_draft", "check_send_as", "modify_labels", "trash_thread", "untrash_thread"]);
     for (const t of tools) {
       expect(t.description, t.name).toContain("untrusted data");
       if (t.name === "list_accounts" || (READ_TOOLS as readonly string[]).includes(t.name)) expect(t.annotations?.readOnlyHint, t.name).toBe(true);

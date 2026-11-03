@@ -257,7 +257,7 @@ export class GmailClient {
     return { threads: out, ...(typeof next === "string" && next.length > 0 ? { nextPageToken: next } : {}), ...(typeof estimate === "number" ? { resultSizeEstimate: estimate } : {}) };
   }
 
-  async getThread(target: ResolvedMailbox, id: string, format: "full" | "metadata", metadataHeaders?: readonly string[]): Promise<GmailThread> {
+  async getThread(target: ResolvedMailbox, id: string, format: "full" | "metadata" | "minimal", metadataHeaders?: readonly string[]): Promise<GmailThread> {
     assertGmailId("thread", id, target.mailbox.address);
     const raw = await this.get(target, `threads/${encodeURIComponent(id)}`, { format, metadataHeaders }, `reading thread ${id}`);
     if (!isRecord(raw) || typeof raw["id"] !== "string") throw this.malformed(target, `reading thread ${id}`);
@@ -290,6 +290,29 @@ export class GmailClient {
     const raw = await this.get(target, `messages/${encodeURIComponent(id)}`, { format: "metadata", metadataHeaders: headers }, `reading message ${id}`);
     if (!isRecord(raw) || typeof raw["id"] !== "string" || typeof raw["threadId"] !== "string") throw this.malformed(target, `reading message ${id}`);
     return raw as unknown as GmailMessage;
+  }
+
+  /** One message's ids and labels only (format=minimal): used to read back a label change. */
+  async getMessageLabels(target: ResolvedMailbox, id: string): Promise<GmailMessage> {
+    assertGmailId("message", id, target.mailbox.address);
+    const raw = await this.get(target, `messages/${encodeURIComponent(id)}`, { format: "minimal" }, `reading message ${id}`);
+    if (!isRecord(raw) || typeof raw["id"] !== "string" || typeof raw["threadId"] !== "string") throw this.malformed(target, `reading message ${id}`);
+    return raw as unknown as GmailMessage;
+  }
+
+  /**
+   * messages.modify or threads.modify (a thread's change applies to every message in it). Label ids only; the caller
+   * resolves names and reads the result back, so nothing is inferred from Gmail's answer here.
+   */
+  async modifyLabels(target: ResolvedMailbox, kind: "thread" | "message", id: string, add: readonly string[], remove: readonly string[]): Promise<void> {
+    assertGmailId(kind, id, target.mailbox.address);
+    await this.request(target, "POST", `${kind}s/${encodeURIComponent(id)}/modify`, {}, { addLabelIds: add, removeLabelIds: remove }, `changing the labels of ${kind} ${id}`, "write");
+  }
+
+  /** threads.trash / threads.untrash. Trash is reversible for 30 days; nothing here deletes permanently. */
+  async trashThread(target: ResolvedMailbox, id: string, action: "trash" | "untrash"): Promise<void> {
+    assertGmailId("thread", id, target.mailbox.address);
+    await this.request(target, "POST", `threads/${encodeURIComponent(id)}/${action}`, {}, undefined, `${action === "trash" ? "moving" : "restoring"} thread ${id} ${action === "trash" ? "to" : "from"} Trash`, "write");
   }
 
   async listSendAs(target: ResolvedMailbox): Promise<readonly GmailSendAs[]> {

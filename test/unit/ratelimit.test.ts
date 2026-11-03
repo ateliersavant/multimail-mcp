@@ -31,6 +31,6 @@ describe("fixed-window arithmetic", () => {
   it("parses overrides strictly, falling back on junk or out-of-range values", () => {
     expect(parseLimit("40", 120, 5, 10_000)).toBe(40);
     for (const bad of [undefined, "", "abc", "-5", "1e3", "4", "999999", " 12x"]) expect(parseLimit(bad, 120, 5, 10_000), String(bad)).toBe(120);
-    expect(DEFAULT_LIMITS).toEqual({ mcpPerMinute: 120, draftsPerHour: 120, sendsPerHour: 20, sendsPerDay: 100 });
+    expect(DEFAULT_LIMITS).toEqual({ mcpPerMinute: 120, draftsPerHour: 120, sendsPerHour: 20, sendsPerDay: 100, organisePerHour: 300 });
   });
 });

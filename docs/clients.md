@@ -1,44 +1,63 @@
 # Client setup
 
-Each path below carries the date it was last **verified end-to-end** against this server. "unverified" means the steps come from the vendor's documentation as read on 2026-11-03 and have not yet been exercised here. Vendors change these flows often; if a step fails, check their current docs before assuming a server bug.
+The MCP endpoint is always `https://<host>/mcp`, where `<host>` is the Worker's public hostname.
 
-`<host>` is the Worker's public hostname. The MCP endpoint is always `https://<host>/mcp`.
+Each client below has two kinds of evidence. **Live** means the whole path, Google sign-in included, was exercised against the running server on the date given. **Replayed** means the client's real, published Client ID Metadata Document (fetched 2026-11-03, kept in `test/fixtures/client-metadata/`) is run through the Worker in the test suite (`test/worker/clients.test.ts`) and reaches the consent page; the live sign-in has not been done yet. Vendors change these flows often. If a step fails, check their current docs before assuming a server bug.
 
 ## How clients authorise (all of them)
 
-1. The client calls `/mcp` without a token and receives `401` with a `WWW-Authenticate` header pointing at `https://<host>/.well-known/oauth-protected-resource`.
-2. It reads the authorization-server metadata, registers itself (Client ID Metadata Document first, Dynamic Client Registration as fallback, or a pre-registered client id) and starts an OAuth 2.1 code flow with PKCE and the `resource` parameter set to `https://<host>/mcp`.
-3. The server redirects you to **Sign in with Google**. Only emails in the operator's allowlist receive a token; anyone else sees `403` and nothing else.
-4. The client stores the access and refresh tokens and calls `/mcp` with `Authorization: Bearer`.
+1. The client calls `/mcp` without a token and receives `401` with a `WWW-Authenticate` header naming the scope `mail` and pointing at `https://<host>/.well-known/oauth-protected-resource/mcp`.
+2. It reads the authorization-server metadata and identifies itself with a **Client ID Metadata Document**: its `client_id` is the URL of a JSON document it publishes. The server accepts these documents only from the supported clients' hosts (`claude.ai`, `claude.com`, `chatgpt.com`). Dynamic Client Registration is the fallback, and only accepts redirects to those hosts or to loopback.
+3. It starts an OAuth 2.1 code flow with PKCE and `resource=https://<host>/mcp`. The server shows a consent page naming the client and where it returns, then hands you to **Sign in with Google**.
+4. Only an allow-listed Google account that is managed by the company's own Google Workspace receives a token. Anyone else is refused.
+5. The client stores the access and refresh tokens and calls `/mcp` with `Authorization: Bearer`.
 
-## Claude (web, desktop, iPhone / Android) — web verified 2026-11-03
+The server returns RFC 9207 `iss` in every authorization response, so ChatGPT and Codex use their stable callbacks rather than per-connection ones.
+
+## Claude (web, desktop, iPhone and Android): live 2026-11-03 (web)
 
 1. Settings → Connectors → **Add custom connector**.
-2. Name `multimail`, URL `https://<host>/mcp`. Leave client id/secret empty: Claude registers itself. (If your org requires fixed credentials, the operator can pre-register a client and give you its id/secret instead.)
+2. Name `multimail`, URL `https://<host>/mcp`. Leave client id and secret empty: Claude identifies itself.
 3. Connect → Google sign-in → allow.
 4. In a conversation, enable the connector and ask Claude to call `list_accounts`.
 
-Claude's callback is `https://claude.ai/api/mcp/auth_callback`.
+| | |
+|---|---|
+| Metadata document | `https://claude.ai/oauth/mcp-oauth-client-metadata` |
+| Callback | `https://claude.ai/api/mcp/auth_callback` |
+| Client authentication | none (public client, PKCE) |
 
-Claude keeps the tool list it fetched when the connector was connected. After the server gains tools (for example after an upgrade), open Settings, Connectors, this connector, and choose Disconnect then Connect; then start a new conversation. On Team/Enterprise plans an Owner adds the connector for the workspace.
+Claude keeps the tool list it fetched when the connector was connected. After the server gains or changes tools, open Settings → Connectors → this connector, choose **Disconnect** then **Connect**, and start a new conversation. On Team and Enterprise plans an Owner adds the connector for the workspace.
 
-## Claude Code — unverified
+## Claude Code: replayed
 
 ```bash
 claude mcp add --transport http multimail https://<host>/mcp
 ```
 
-Then inside Claude Code run `/mcp`, choose `multimail`, and complete the Google sign-in in the browser. Claude Code uses a Client ID Metadata Document that declares loopback redirect URIs; the server accepts `http://localhost/callback` and `http://127.0.0.1/callback` on any port.
+Then run `/mcp` inside Claude Code, choose `multimail`, and complete the Google sign-in in the browser.
 
-## ChatGPT (web) — unverified
+| | |
+|---|---|
+| Metadata document | `https://claude.ai/oauth/claude-code-client-metadata` |
+| Callback | `http://localhost/callback` or `http://127.0.0.1/callback`, on whatever port Claude Code listens on |
+| Client authentication | none |
+
+## ChatGPT (web): replayed
 
 1. **Plugins → + → Add custom MCP server** (earlier UI: Settings → Apps & Connectors, in developer mode).
-2. URL `https://<host>/mcp`, authentication OAuth.
+2. URL `https://<host>/mcp`, authentication OAuth. Leave client id and secret empty.
 3. Complete the Google sign-in.
 
-ChatGPT prefers Client ID Metadata Documents and falls back to Dynamic Client Registration. Its redirect URI is `https://chatgpt.com/connector_platform_oauth_redirect` when the server emits RFC 9207 `iss` (this server does); otherwise it is a per-connection `https://chatgpt.com/connector/oauth/{callback_id}` shown on the server's management page. ChatGPT asks for confirmation before every write tool; that is expected.
+| | |
+|---|---|
+| Metadata document | `https://chatgpt.com/oauth/client.json` |
+| Callback | `https://chatgpt.com/connector_platform_oauth_redirect` |
+| Client authentication | `private_key_jwt`: ChatGPT signs a client assertion with keys published at `https://chatgpt.com/oauth/jwks.json`, which the server fetches to verify it |
 
-## Codex (CLI, IDE extension, desktop app) — unverified
+ChatGPT asks for confirmation before every tool that changes something; that is expected.
+
+## Codex (CLI, IDE extension, desktop app): replayed
 
 ```bash
 codex mcp add multimail --url https://<host>/mcp
@@ -48,8 +67,18 @@ codex mcp add multimail --url https://<host>/mcp
 codex mcp login multimail
 ```
 
-All three Codex surfaces share this configuration. Codex selects Client ID Metadata Documents when the server advertises them, falls back to Dynamic Client Registration, or uses `--oauth-client-id` for a pre-registered client.
+All three Codex surfaces share this configuration (`~/.codex/config.toml`). On a machine without a browser, add `--no-browser` to the login and paste the final redirect URL back into the terminal.
+
+| | |
+|---|---|
+| Metadata document | `https://chatgpt.com/oauth/codex/client.json` |
+| Callback | `http://127.0.0.1/callback` or `http://localhost/callback`, on a random port |
+| Client authentication | none |
+
+## A client that is not listed
+
+A client whose metadata document is on another host, or that registers with a redirect to another host, is refused with `invalid_client` or `invalid_redirect_uri`. If you trust it, the operator adds its host (runbook section 11).
 
 ## Revoking a client
 
-Sign out of the connector in the client, then (operator) revoke its tokens from the server's audit tooling. Removing the connector in the client does not by itself revoke tokens; the server's refresh tokens expire on their own schedule.
+Disconnect it in the client. To cut it off at the server at once, use the runbook: the emergency stop (section 1) refuses every call within seconds, and section 4 revokes every token. Removing a connector in the client does not by itself revoke its tokens; refresh tokens expire after 7 days without use and 30 days at most.

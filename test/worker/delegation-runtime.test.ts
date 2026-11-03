@@ -21,7 +21,7 @@ describe("delegation in the Workers runtime", () => {
     const tokens = new DelegationTokenSource({ secrets: { SA_EXAMPLE_STUDIO: sa.json }, fetch });
     const gmail = new GmailClient({ fetch, tokens });
     const labels = await gmail.listLabels(ada);
-    expect(labels.map((l) => l.id)).toEqual(["INBOX", "SENT", "Label_7"]);
+    expect(labels.map((l) => l.id)).toEqual(["INBOX", "SENT", "UNREAD", "STARRED", "TRASH", "SPAM", "Label_7"]);
     const page = await gmail.listThreads(ada, { q: "invoice", maxResults: 5 });
     expect(page.threads.map((t) => t.id)).toEqual(["t-invoice"]);
     expect(google.tokensIssued).toBe(1);

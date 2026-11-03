@@ -25,9 +25,11 @@ export interface Limits {
   /** send_draft per principal per hour, and per day. */
   readonly sendsPerHour: number;
   readonly sendsPerDay: number;
+  /** modify_labels + trash_thread + untrash_thread per principal per hour. */
+  readonly organisePerHour: number;
 }
 
-export const DEFAULT_LIMITS: Limits = { mcpPerMinute: 120, draftsPerHour: 120, sendsPerHour: 20, sendsPerDay: 100 };
+export const DEFAULT_LIMITS: Limits = { mcpPerMinute: 120, draftsPerHour: 120, sendsPerHour: 20, sendsPerDay: 100, organisePerHour: 300 };
 
 /** Parses an optional override such as MCP_RATE_LIMIT_PER_MINUTE; out-of-range or junk values fall back to the default. */
 export function parseLimit(raw: string | undefined, fallback: number, min: number, max: number): number {

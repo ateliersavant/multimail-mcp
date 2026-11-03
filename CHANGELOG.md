@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Organising tools: `modify_labels` (labels, archive, read and unread, star on one thread or message; labels resolved against the mailbox's own list; Trash, Spam and Gmail-managed labels refused), `trash_thread` and `untrash_thread`. Every change is read back and reported as confirmed or not; 300 changes per hour per principal; nothing is deleted permanently. Egress gains exactly the four calls these need.
+- Clients: the published metadata documents of Claude, Claude Code, ChatGPT and Codex are replayed through the Worker in tests and reach the consent page; `docs/clients.md` rewritten with each client's document, callback and authentication method.
+- Documentation: `docs/design.md` (public design), `llms.txt`, README status brought up to date.
+
 - Phase 3 hardening. Durable 90-day audit log in D1 with a daily retention job and `npm run audit:export`; atomic rate limits (per client token, per principal for drafts and sends, per source address for registrations); runbook; review pack for the independent reviewer.
 - Adversarial review: nine confirmed findings, each proven by a failing test and fixed; the tests now run with the suite (`test/adversarial/`). Sender and recipient headers parsed per RFC 5322 so a display name never hides the real address; drafts are plain text only and `get_draft` shows any HTML part; an atomic claim per draft so concurrent sends reach Gmail once; the From is read untruncated at send time (one From header, one mailbox, matching Sender); a 404 at send is ambiguous; a failed ledger write is reported with the send; HTML stripping in linear time; client metadata documents only from supported hosts; sign-in requires the company's own Workspace (`hd`); configuration errors carry no tenant-file content.
 - Registration accepts only redirects to supported clients or loopback, and no client key URLs. Egress narrowed from path prefixes to the exact method and path of each Google call (the `gmail.modify` scope's direct send, trash and label changes are unreachable). The unused token-revocation endpoint left the allowlist.

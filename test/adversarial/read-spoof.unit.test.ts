@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { STUDIO_ADA, sampleMailboxes } from "../helpers/fake-gmail.js";
-import { harness, text, type Harness } from "./harness.js";
+import { harness, text, type Harness } from "../helpers/mcp-harness.js";
 
 const ATTACKER = "attacker@evil.test";
 const SPOOFED = "ceo@example-studio.test";

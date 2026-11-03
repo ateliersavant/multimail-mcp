@@ -1,6 +1,7 @@
 /**
  * The same wiring as test/unit/write-tools.test.ts (real MCP server, real Gmail client, real delegation and egress,
- * fake Google), with hooks the adversarial tests need: an injectable ledger and mailbox data.
+ * fake Google), with hooks for an injectable ledger, mailbox data and limits. Used by the adversarial tests and
+ * the organising-tool tests.
  */
 import { readFileSync } from "node:fs";
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -10,10 +11,10 @@ import { loadConfig, type AppConfig } from "../../src/config.js";
 import { GmailClient } from "../../src/gmail/client.js";
 import { DelegationTokenSource } from "../../src/gmail/delegation.js";
 import { MemorySendLedger, type SendLedger } from "../../src/gmail/ledger.js";
-import { MemoryRateLimiter } from "../../src/guard/ratelimit.js";
+import { DEFAULT_LIMITS, MemoryRateLimiter, type Limits } from "../../src/guard/ratelimit.js";
 import { buildMcpServer } from "../../src/mcp/server.js";
 import { GOOGLE_EGRESS, createEgressFetch } from "../../src/net/egress.js";
-import { FakeGoogle, LABS_GRACE, STUDIO_ADA, STUDIO_HELLO, makeServiceAccount, sampleMailboxes, type FakeMailboxData, type TestServiceAccount } from "../helpers/fake-gmail.js";
+import { FakeGoogle, LABS_GRACE, STUDIO_ADA, STUDIO_HELLO, makeServiceAccount, sampleMailboxes, type FakeMailboxData, type TestServiceAccount } from "./fake-gmail.js";
 
 const fixture = readFileSync(new URL("../../fixtures/tenants.example.json", import.meta.url), "utf8");
 export const NOW = Date.UTC(2026, 10, 3, 12, 0, 0);
@@ -38,7 +39,7 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-export async function harness(opts: { readonly ledger?: SendLedger; readonly mailboxes?: Record<string, FakeMailboxData> } = {}): Promise<Harness> {
+export async function harness(opts: { readonly ledger?: SendLedger; readonly mailboxes?: Record<string, FakeMailboxData>; readonly limits?: Partial<Limits> } = {}): Promise<Harness> {
   const { cfg, studioSa, labsSa } = await setup();
   const clock = () => NOW;
   const google = new FakeGoogle(
@@ -58,6 +59,7 @@ export async function harness(opts: { readonly ledger?: SendLedger; readonly mai
     now: clock,
     ledger: opts.ledger ?? new MemorySendLedger(clock),
     rateLimiter: new MemoryRateLimiter(clock),
+    limits: { ...DEFAULT_LIMITS, ...opts.limits },
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);

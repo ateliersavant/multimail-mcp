@@ -18,6 +18,8 @@ A remote MCP server on Cloudflare Workers. It lets AI clients (Claude, ChatGPT, 
 | Reading, HTML stripping, address parsing, bounds | `src/gmail/render.ts`, `src/gmail/address.ts`, `src/mcp/tools/read.ts` | `test/unit/render.test.ts`, `test/unit/read-tools.test.ts` |
 | Drafting and sending, send-as checks, three-state confirmation, sent-draft ledger | `src/mcp/tools/write.ts`, `src/gmail/sendas.ts`, `src/gmail/ledger.ts`, `src/store/oauth-store.ts` | `test/unit/write-tools.test.ts`, `test/unit/ledger.test.ts`, `test/worker/ledger-runtime.test.ts` |
 | MIME building, header injection | `src/gmail/mime.ts` | `test/unit/mime.test.ts` |
+| Labels, archive, Trash | `src/mcp/tools/organise.ts` | `test/unit/organise-tools.test.ts` |
+| The supported clients' real metadata documents | `test/fixtures/client-metadata/` | `test/worker/clients.test.ts` |
 | Egress allowlist | `src/net/egress.ts`, `scripts/check-egress.mjs` | `test/unit/egress.test.ts`, `test/worker/egress-runtime.test.ts` |
 | OAuth state, rate limits | `src/store/`, `src/guard/ratelimit.ts` | `test/worker/store.test.ts`, `test/worker/ratelimit-runtime.test.ts`, `test/unit/ratelimit.test.ts` |
 | Audit log | `src/audit.ts`, `migrations/0001_audit.sql` | `test/unit/audit.test.ts`, `test/worker/audit-d1.test.ts` |
@@ -46,6 +48,7 @@ npm run verify
 | Never a duplicate send; never success by inference | atomic claim, ledger and three outcomes; mutations `send-claim-atomic`, `sent-ledger`, `ledger-release-keeps-sent-durable`, `ledger-release-keeps-sent-memory`, `send-confirm-sent-label`, `send-ambiguous-probe`, `send-404-ambiguous`, `send-ledger-failure-reported` |
 | The approved text is what recipients read | plain-text drafts only, HTML parts shown, real addresses always displayed; mutations `no-model-html`, `draft-html-shown`, `display-real-address` |
 | No header injection | mutation `mime-header-injection` |
+| Nothing deleted permanently; mailbox changes confirmed, never inferred | no delete or bulk path in the egress rules; Trash per thread only; Spam and Gmail-managed labels refused; every change read back; mutations `organise-label-not-allowed`, `organise-unknown-label`, `organise-single-target`, `organise-confirm-labels`, `organise-confirm-trash`, `organise-rate-limit`, `egress-method`, `egress-exact-path` |
 | Fail closed, and loud without leaking | config and bindings; configuration errors name variables, never values; mutations `public-url-must-be-https`, `tenant-unknown-keys`, `bindings-fail-closed`, `gmail-error-not-empty`, `config-error-no-values` |
 | Content-free, durable audit for 90 days | closed field set, no content columns, retention job; mutations `audit-durable-sink`, `audit-retention` |
 | Rate limits | per client token and per principal, atomic; mutations `mcp-rate-limit`, `send-rate-limit`, `ratelimit-window` |
@@ -78,7 +81,7 @@ An independent agent reviewed the code adversarially and had to prove each findi
 
 The review also raised points it could not prove with a test. Three were acted on:
 
-- `SECURITY.md` said `gmail.modify` could not send directly. It can. The egress rules now name the exact method and path of each Gmail call the server makes, so direct send, trash and label changes are unreachable from the Worker, and the documents state the scope's real reach.
+- `SECURITY.md` said `gmail.modify` could not send directly. It can. The egress rules now name the exact method and path of each Gmail call the server makes, so direct send, per-message trash, bulk changes and deletes are unreachable from the Worker (label and Trash changes are reachable only per thread or message, through the organising tools), and the documents state the scope's real reach.
 - Open Dynamic Client Registration let anyone register a look-alike client with any redirect. Registration now accepts only redirects to the supported clients' hosts or to loopback, refuses client key URLs, and is limited per source address.
 - Long recipient and References lines are folded at 78 characters.
 

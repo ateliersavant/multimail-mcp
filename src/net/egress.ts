@@ -4,7 +4,9 @@
  * CI additionally greps the source for any other host.
  *
  * The rules name each Gmail call this server makes and nothing more. The `gmail.modify` scope would also let a token
- * send a message directly, trash, or change labels; none of those paths is reachable from here.
+ * send a message directly, trash single messages, import or insert mail, or change many messages at once; none of
+ * those paths is reachable from here. Labels and Trash are reachable only per thread or message, through the
+ * organising tools.
  */
 export class EgressDeniedError extends Error {
   constructor(reason: string, url: URL) {
@@ -47,6 +49,10 @@ export const GOOGLE_EGRESS: EgressPolicy = new Map<string, readonly EgressRule[]
       gmail("PUT", "drafts/{id}"),
       gmail("DELETE", "drafts/{id}"),
       gmail("POST", "drafts/send"),
+      gmail("POST", "threads/{id}/modify"),
+      gmail("POST", "messages/{id}/modify"),
+      gmail("POST", "threads/{id}/trash"),
+      gmail("POST", "threads/{id}/untrash"),
     ],
   ],
   // accounts.google.com is where the user's BROWSER goes to sign in; the Worker never fetches it.

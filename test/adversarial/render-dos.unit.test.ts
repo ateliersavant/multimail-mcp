@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { STUDIO_ADA, sampleMailboxes } from "../helpers/fake-gmail.js";
-import { harness, text, type Harness } from "./harness.js";
+import { harness, text, type Harness } from "../helpers/mcp-harness.js";
 
 const PAYLOAD = "<!--".repeat(40_000); // 160 kB of HTML, well under Gmail's message size limits
 

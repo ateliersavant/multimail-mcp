@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { STUDIO_ADA } from "../helpers/fake-gmail.js";
-import { harness, text, type Harness } from "./harness.js";
+import { harness, text, type Harness } from "../helpers/mcp-harness.js";
 
 /** On Gmail's own "Send mail as" list for ada (accepted), but NOT on the operator's send-as list for ada. */
 const NOT_ALLOWLISTED = "extra@example-studio.test";

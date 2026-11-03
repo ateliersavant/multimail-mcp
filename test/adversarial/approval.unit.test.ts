@@ -6,7 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { STUDIO_ADA } from "../helpers/fake-gmail.js";
-import { harness, text, type Harness } from "./harness.js";
+import { harness, text, type Harness } from "../helpers/mcp-harness.js";
 
 let h: Harness;
 beforeEach(async () => {
