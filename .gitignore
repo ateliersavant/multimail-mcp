@@ -1,0 +1,24 @@
+# Internal handoff: names real mailboxes, aliases and domains. Never commit.
+multimail-mcp-HANDOFF.md
+
+# Real tenant config and secrets (rule 10). Only tenants.example.json is tracked.
+tenants.json
+*.key.json
+*.pem
+.dev.vars
+.env
+.env.*
+
+# Tooling noise
+node_modules/
+dist/
+.wrangler/
+*.profraw
+.DS_Store
+*.tsbuildinfo
+coverage/
+deploy.local.json
+worker-configuration.d.ts
+
+# Real-name denylist for scripts/check-forbidden.mjs (names real companies; never commit)
+.forbidden-terms

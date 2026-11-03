@@ -1,0 +1,18 @@
+{
+  "$comment": "Every hostname that may appear anywhere under src/. check-egress.mjs fails CI on any other host, comments included. Egress hosts must also be in src/net/egress.ts; redirect-URI hosts are places the user's browser goes, never the Worker.",
+  "egress": {
+    "oauth2.googleapis.com": "token / revoke / tokeninfo",
+    "www.googleapis.com": "JWKS (/oauth2/v3/certs) and the single Gmail scope string",
+    "gmail.googleapis.com": "Gmail API"
+  },
+  "redirect-uris": {
+    "accounts.google.com": "the browser is sent here to sign in; the Worker never fetches it",
+    "localhost": "loopback redirect (Claude Code CIMD, local dev)",
+    "127.0.0.1": "loopback redirect (Claude Code CIMD)"
+  },
+  "documentation-only": {
+    "modelcontextprotocol.io": "spec links in comments",
+    "datatracker.ietf.org": "RFC links in comments",
+    "developers.google.com": "API reference links in comments"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$comment": "Fictional fixture. Real tenants live in an untracked tenants.json (see docs/operator-setup.md). The .test TLD is reserved and never resolves.",
+  "tenants": [
+    {
+      "id": "example-studio",
+      "label": "Example Studio",
+      "domains": ["example-studio.test", "example-studio-alias.test"],
+      "serviceAccountSecret": "SA_EXAMPLE_STUDIO",
+      "mailboxes": [
+        {
+          "address": "ada@example-studio.test",
+          "sendAs": ["ada@example-studio.test", "ada@example-studio-alias.test", "hello@example-studio.test"]
+        },
+        { "address": "hello@example-studio.test", "sendAs": ["hello@example-studio.test"] }
+      ]
+    },
+    {
+      "id": "example-labs",
+      "label": "Example Labs",
+      "domains": ["example-labs.test"],
+      "serviceAccountSecret": "SA_EXAMPLE_LABS",
+      "mailboxes": [
+        { "address": "grace@example-labs.test", "sendAs": ["grace@example-labs.test", "press@example-labs.test"] }
+      ]
+    }
+  ]
+}

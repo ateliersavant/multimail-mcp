@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+PUBLIC_URL=http://localhost:8787
+ALLOWED_PRINCIPALS=you@your-workspace-domain.example
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+# Paste the contents of a tenant file on one line, or use fixtures/tenants.example.json for a dry run.
+TENANTS_JSON={"tenants":[]}

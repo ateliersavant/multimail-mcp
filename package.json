@@ -1,0 +1,39 @@
+{
+  "name": "multimail-mcp",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Multi-tenant Gmail MCP server for Claude, ChatGPT and Codex: self-hosted on Cloudflare Workers, Google Workspace domain-wide delegation, draft-then-send only, hard walls between companies.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "typecheck": "npm run types && tsc -p tsconfig.json && tsc -p tsconfig.test.json",
+    "test": "vitest",
+    "test:unit": "vitest --project unit",
+    "test:worker": "vitest --project worker",
+    "check:egress": "node scripts/check-egress.mjs",
+    "check:tenants": "tsx scripts/check-tenants.mts",
+    "verify": "npm run typecheck && vitest run && npm run check:egress && npm run check:forbidden && npm run check:tenants -- fixtures/tenants.example.json && npm run test:mutation",
+    "deploy": "npm run verify && node scripts/deploy.mjs",
+    "test:mutation": "node scripts/mutate.mjs",
+    "check:forbidden": "node scripts/check-forbidden.mjs"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/server": "2.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.5.0",
+    "@modelcontextprotocol/client": "2.4.0",
+    "@types/node": "^24.19.2",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0",
+    "wrangler": "4.156.2"
+  }
+}

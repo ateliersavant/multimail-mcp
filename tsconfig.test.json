@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node", "@cloudflare/vitest-plugin/types"],
+    "noPropertyAccessFromIndexSignature": false
+  },
+  "include": ["worker-configuration.d.ts", "src/**/*.ts", "test/**/*.ts", "scripts/**/*.mts"]
+}
