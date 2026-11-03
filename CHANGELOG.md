@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix: Gmail draft ids of the form `s:` followed by digits are accepted. `list_drafts` failed for a whole mailbox holding such a draft, and the draft could not be read, sent or deleted. Thread and message ids stay strictly checked.
+- CAPABILITIES.md regraded from the live audit log.
 - Organising tools: `modify_labels` (labels, archive, read and unread, star on one thread or message; labels resolved against the mailbox's own list; Trash, Spam and Gmail-managed labels refused), `trash_thread` and `untrash_thread`. Every change is read back and reported as confirmed or not; 300 changes per hour per principal; nothing is deleted permanently. Egress gains exactly the four calls these need.
 - Clients: the published metadata documents of Claude, Claude Code, ChatGPT and Codex are replayed through the Worker in tests and reach the consent page; `docs/clients.md` rewritten with each client's document, callback and authentication method.
 - Documentation: `docs/design.md` (public design), `llms.txt`, README status brought up to date.

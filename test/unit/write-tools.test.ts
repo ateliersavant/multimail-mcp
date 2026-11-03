@@ -582,3 +582,27 @@ describe("send_draft after the adversarial review", () => {
     expect([a, b].filter((r) => r.isError === true)).toHaveLength(1);
   });
 });
+
+describe("draft ids in Gmail's colon form (s:…), as found on a real mailbox", () => {
+  it("every draft tool works with them, and the id travels percent-encoded in one path segment", async () => {
+    h.google.draftIdStyle = "s";
+    const id = await draftId();
+    expect(id).toMatch(/^s:\d+$/);
+    const listed = await h.call("list_drafts", { account: STUDIO_ADA });
+    expect(listed.isError, text(listed)).toBeFalsy();
+    expect((listed.structuredContent as { drafts: { draftId: string }[] }).drafts.map((d) => d.draftId)).toContain(id);
+    const got = await h.call("get_draft", { account: STUDIO_ADA, draft_id: id });
+    expect(got.isError, text(got)).toBeFalsy();
+    const upd = await h.call("update_draft", { account: STUDIO_ADA, draft_id: id, from: STUDIO_ADA, to: ["bill@vendor.test"], subject: "Invoice 1042", body_text: "Paid today, receipt attached later." });
+    expect(upd.isError, text(upd)).toBeFalsy();
+    expect(h.google.calls.some((c) => c.path.includes(`/drafts/${encodeURIComponent(id)}`) && c.path.includes("%3A"))).toBe(true);
+    expect(((await send(id)).structuredContent as unknown as SendOut).status).toBe("sent_confirmed");
+    const again = await send(id);
+    expect(again.isError).toBe(true);
+    expect(h.written.at(-1)).toMatchObject({ errorCode: "already_sent" });
+    const other = await draftId();
+    const del = await h.call("delete_draft", { account: STUDIO_ADA, draft_id: other });
+    expect(del.isError, text(del)).toBeFalsy();
+    expect(h.google.draftIds(STUDIO_ADA)).not.toContain(other);
+  });
+});

@@ -24,10 +24,16 @@ export class GmailApiError extends Error {
   }
 }
 
-/** Gmail ids are opaque hex strings; anything else never reaches a URL. */
+/**
+ * Thread and message ids are opaque hex strings. Draft ids come in more than one form: `r-` followed by digits for
+ * most, `s:` followed by digits for others (seen on a real mailbox, 2026-11-04). Anything else never reaches a URL,
+ * and every id is percent-encoded into its single path segment (a colon travels as %3A).
+ */
 const GMAIL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+const DRAFT_ID = /^[A-Za-z0-9_-]{1,64}(?::[A-Za-z0-9_-]{1,64})?$/;
 export function assertGmailId(kind: "thread" | "message" | "draft", id: string, account: string): void {
-  if (!GMAIL_ID.test(id)) throw new GmailApiError("gmail_bad_id", 0, account, `"${id.slice(0, 40)}" is not a valid Gmail ${kind} id for ${account}.`);
+  const ok = kind === "draft" ? DRAFT_ID.test(id) : GMAIL_ID.test(id);
+  if (!ok) throw new GmailApiError("gmail_bad_id", 0, account, `"${id.slice(0, 40)}" is not a valid Gmail ${kind} id for ${account}.`);
 }
 
 export interface GmailHeader {

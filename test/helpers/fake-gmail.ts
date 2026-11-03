@@ -225,6 +225,8 @@ export class FakeGoogle {
   rewriteFromToPrimary = false;
   /** Simulates Gmail not (yet) labelling a sent message SENT. */
   omitSentLabel = false;
+  /** The form of new draft ids: Gmail's usual `r-…`, or the `s:…` form some real drafts have. */
+  draftIdStyle: "r" | "s" = "r";
   /** Simulates Gmail accepting a label or Trash change without applying it. */
   ignoreLabelChanges = false;
   /** Simulates reading a thread or message back failing (503) after a change. */
@@ -468,7 +470,7 @@ export class FakeGoogle {
       const body = JSON.parse(bodyText) as { message?: { raw?: string; threadId?: string } };
       if (typeof body.message?.raw !== "string") return json({ error: { code: 400, status: "INVALID_ARGUMENT" } }, 400);
       this.counter++;
-      const d: FakeDraft = { id: `r-${this.counter}`, messageId: `dm-${this.counter}`, threadId: body.message.threadId ?? `t-new-${this.counter}`, raw: body.message.raw };
+      const d: FakeDraft = { id: this.draftIdStyle === "s" ? `s:${12908613898737284000 + this.counter}` : `r-${this.counter}`, messageId: `dm-${this.counter}`, threadId: body.message.threadId ?? `t-new-${this.counter}`, raw: body.message.raw };
       drafts.set(d.id, d);
       return json({ id: d.id, message: { id: d.messageId, threadId: d.threadId, labelIds: ["DRAFT"] } });
     }
