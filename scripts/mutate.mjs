@@ -109,6 +109,70 @@ const MUTATIONS = [
     projects: ["unit"],
   },
   {
+    // Phase 2, rule 4: the operator's send-as list is checked at send time too (a draft can be edited in Gmail).
+    id: "send-as-allowlist",
+    file: "src/gmail/sendas.ts",
+    find: "  if (!allowlisted) {",
+    replace: "  if (false) {",
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 4: an alias Gmail still has pending must never be used.
+    id: "send-as-pending",
+    file: "src/gmail/sendas.ts",
+    find: '  else if (entry.verificationStatus === "pending") gmailStatus = "pending";',
+    replace: '  else if (entry.verificationStatus === "pending") gmailStatus = "accepted";',
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 4: an address Gmail does not list would be silently rewritten to the primary address.
+    id: "send-as-missing-in-gmail",
+    file: "src/gmail/sendas.ts",
+    find: '  if (entry === undefined) gmailStatus = "missing";',
+    replace: '  if (entry === undefined) gmailStatus = "primary";',
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 4: the draft's From is verified again as it is at send time.
+    id: "send-reverify-at-send-time",
+    file: "src/mcp/tools/write.ts",
+    find: "    requireSendAs(t, fromAddress, await deps.gmail.listSendAs(t));",
+    replace: "    void requireSendAs;",
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 5: a draft already sent is refused, never sent or recreated.
+    id: "sent-ledger",
+    file: "src/mcp/tools/write.ts",
+    find: "    const prior = await ledger.lookup(account, draftId);",
+    replace: "    const prior = null;",
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 5: success needs the SENT label, never inference.
+    id: "send-confirm-sent-label",
+    file: "src/mcp/tools/write.ts",
+    find: '    if (!labels.includes("SENT")) {',
+    replace: "    if (false) {",
+    projects: ["unit"],
+  },
+  {
+    // Phase 2, rule 5: an ambiguous error must check the draft, not collapse into "failed" (which invites a resend).
+    id: "send-ambiguous-probe",
+    file: "src/mcp/tools/write.ts",
+    find: "      const stillThere = await draftStillThere(t, draftId);",
+    replace: "      const stillThere = true;",
+    projects: ["unit"],
+  },
+  {
+    // Phase 2: no header value may carry a line break (it would inject a Bcc or other header).
+    id: "mime-header-injection",
+    file: "src/gmail/mime.ts",
+    find: '  if (/[\\r\\n\\0]/.test(value)) throw new MimeError("header_injection"',
+    replace: '  if (false) throw new MimeError("header_injection"',
+    projects: ["unit"],
+  },
+  {
     id: "egress-allowlist",
     file: "src/net/egress.ts",
     find: 'if (prefixes === undefined) throw new EgressDeniedError("host not allowlisted", url);',

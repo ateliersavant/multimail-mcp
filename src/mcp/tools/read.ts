@@ -48,7 +48,8 @@ const Headers = z.object({
   inReplyTo: z.string().optional(),
   references: z.string().optional(),
 });
-const Message = z.object({
+/** Shared with the draft tools, so a draft is shown in exactly the shape of a message. */
+export const Message = z.object({
   messageId: z.string(),
   threadId: z.string(),
   labelIds: z.array(z.string()),

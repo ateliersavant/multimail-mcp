@@ -26,7 +26,7 @@ export class GmailApiError extends Error {
 
 /** Gmail ids are opaque hex strings; anything else never reaches a URL. */
 const GMAIL_ID = /^[A-Za-z0-9_-]{1,128}$/;
-export function assertGmailId(kind: "thread" | "message", id: string, account: string): void {
+export function assertGmailId(kind: "thread" | "message" | "draft", id: string, account: string): void {
   if (!GMAIL_ID.test(id)) throw new GmailApiError("gmail_bad_id", 0, account, `"${id.slice(0, 40)}" is not a valid Gmail ${kind} id for ${account}.`);
 }
 
@@ -86,6 +86,45 @@ export interface ListThreadsParams {
   readonly labelIds?: readonly string[];
 }
 
+/** One entry of Gmail's "Send mail as" list (users.settings.sendAs). */
+export interface GmailSendAs {
+  readonly sendAsEmail: string;
+  readonly displayName?: string;
+  readonly isPrimary: boolean;
+  readonly isDefault: boolean;
+  readonly treatAsAlias?: boolean;
+  /** `accepted`, `pending`, `verificationStatusUnspecified`, or absent (Google: applies only to custom "from" aliases). */
+  readonly verificationStatus?: string;
+}
+
+/** What drafts.create / drafts.update return. */
+export interface GmailDraftRef {
+  readonly id: string;
+  readonly message: { readonly id: string; readonly threadId: string; readonly labelIds?: readonly string[] };
+}
+
+export interface GmailDraft {
+  readonly id: string;
+  readonly message: GmailMessage;
+}
+
+export interface GmailDraftListPage {
+  readonly drafts: readonly GmailDraftRef[];
+  readonly nextPageToken?: string;
+  readonly resultSizeEstimate?: number;
+}
+
+/** What drafts.send returns: the sent message's ids. */
+export interface GmailSentRef {
+  readonly id: string;
+  readonly threadId: string;
+  readonly labelIds?: readonly string[];
+}
+
+type Method = "GET" | "POST" | "PUT" | "DELETE";
+/** Reads say "No mail was read"; writes say nothing was changed. The wording matters to a model deciding to retry. */
+type Effect = "read" | "write";
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -112,8 +151,9 @@ async function googleStatusEnum(res: Response): Promise<string | undefined> {
   }
 }
 
-function describe(code: GmailErrorCode, status: number, account: string, what: string, reason: string | undefined): string {
+function describe(code: GmailErrorCode, status: number, account: string, what: string, reason: string | undefined, effect: Effect = "read"): string {
   const tail = reason !== undefined ? `, ${reason}` : "";
+  if (effect === "write") return describeWrite(code, status, account, what, tail);
   switch (code) {
     case "gmail_unauthorized":
       return `Gmail rejected the delegated credentials for ${account} while ${what} (HTTP 401${tail}). The service account may not be authorised for domain-wide delegation with the Gmail scope in this tenant. No mail was read.`;
@@ -132,6 +172,25 @@ function describe(code: GmailErrorCode, status: number, account: string, what: s
   }
 }
 
+function describeWrite(code: GmailErrorCode, status: number, account: string, what: string, tail: string): string {
+  switch (code) {
+    case "gmail_unauthorized":
+      return `Gmail rejected the delegated credentials for ${account} while ${what} (HTTP 401${tail}). Nothing was created, changed or sent.`;
+    case "gmail_forbidden":
+      return `Gmail refused ${what} for ${account} (HTTP 403${tail}). Nothing was created, changed or sent.`;
+    case "gmail_not_found":
+      return `Gmail has no such item for ${account} while ${what} (HTTP 404${tail}). Nothing was changed.`;
+    case "gmail_rate_limited":
+      return `Gmail rate limit reached for ${account} while ${what} (HTTP 429${tail}). Nothing was created, changed or sent; retry later.`;
+    case "gmail_bad_request":
+      return `Gmail rejected ${what} for ${account} (HTTP ${status}${tail}). Nothing was created, changed or sent. Check the addresses, ids and content.`;
+    case "gmail_unavailable":
+      return `Gmail returned a server error for ${account} while ${what} (HTTP ${status}${tail}). The change may or may not have been applied: check (for example with list_drafts) before trying again.`;
+    default:
+      return `Gmail returned HTTP ${status}${tail} for ${account} while ${what}. Check the result before trying again.`;
+  }
+}
+
 export interface GmailClientDeps {
   /** Must be the egress-checked fetch. */
   readonly fetch: FetchLike;
@@ -141,8 +200,16 @@ export interface GmailClientDeps {
 export class GmailClient {
   constructor(private readonly deps: GmailClientDeps) {}
 
-  /** GET `users/<address>/<path>` as the mailbox. One retry after a 401 with a freshly minted token. */
-  private async get(target: ResolvedMailbox, path: string, params: Readonly<Record<string, string | readonly string[] | undefined>>, what: string): Promise<unknown> {
+  /** GET `users/<address>/<path>` as the mailbox. */
+  private get(target: ResolvedMailbox, path: string, params: Readonly<Record<string, string | readonly string[] | undefined>>, what: string): Promise<unknown> {
+    return this.request(target, "GET", path, params, undefined, what, "read");
+  }
+
+  /**
+   * One call to `users/<address>/<path>` as the mailbox. One retry after a 401 with a freshly minted token: a 401 means
+   * Google rejected the credentials before doing anything, so the retry is safe even for a send. A 204 is `undefined`.
+   */
+  private async request(target: ResolvedMailbox, method: Method, path: string, params: Readonly<Record<string, string | readonly string[] | undefined>>, body: unknown, what: string, effect: Effect): Promise<unknown> {
     const account = target.mailbox.address;
     const url = new URL(`${GMAIL_API_BASE}${encodeURIComponent(account)}/${path}`);
     for (const [k, v] of Object.entries(params)) {
@@ -150,15 +217,16 @@ export class GmailClient {
       if (typeof v === "string") url.searchParams.set(k, v);
       else for (const item of v) url.searchParams.append(k, item);
     }
-    let res = await this.send(target, url);
+    let res = await this.send(target, url, method, body);
     if (res.status === 401) {
       this.deps.tokens.invalidate(target);
-      res = await this.send(target, url);
+      res = await this.send(target, url, method, body);
     }
     if (!res.ok) {
       const code = statusToCode(res.status);
-      throw new GmailApiError(code, res.status, account, describe(code, res.status, account, what, await googleStatusEnum(res)));
+      throw new GmailApiError(code, res.status, account, describe(code, res.status, account, what, await googleStatusEnum(res), effect));
     }
+    if (res.status === 204) return undefined;
     try {
       return await res.json();
     } catch {
@@ -166,9 +234,11 @@ export class GmailClient {
     }
   }
 
-  private async send(target: ResolvedMailbox, url: URL): Promise<Response> {
+  private async send(target: ResolvedMailbox, url: URL, method: Method = "GET", body?: unknown): Promise<Response> {
     const token = await this.deps.tokens.tokenFor(target);
-    return this.deps.fetch(url.toString(), { method: "GET", headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+    const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "application/json" };
+    if (body === undefined) return this.deps.fetch(url.toString(), { method, headers });
+    return this.deps.fetch(url.toString(), { method, headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify(body) });
   }
 
   async listThreads(target: ResolvedMailbox, p: ListThreadsParams): Promise<GmailThreadListPage> {
@@ -212,6 +282,91 @@ export class GmailClient {
       out.push({ id: l["id"], name: l["name"], ...(typeof l["type"] === "string" ? { type: l["type"] } : {}) });
     }
     return out;
+  }
+
+  /** One message's headers and labels only (no body): used to confirm a send and to read a reply's threading headers. */
+  async getMessageMetadata(target: ResolvedMailbox, id: string, headers: readonly string[]): Promise<GmailMessage> {
+    assertGmailId("message", id, target.mailbox.address);
+    const raw = await this.get(target, `messages/${encodeURIComponent(id)}`, { format: "metadata", metadataHeaders: headers }, `reading message ${id}`);
+    if (!isRecord(raw) || typeof raw["id"] !== "string" || typeof raw["threadId"] !== "string") throw this.malformed(target, `reading message ${id}`);
+    return raw as unknown as GmailMessage;
+  }
+
+  async listSendAs(target: ResolvedMailbox): Promise<readonly GmailSendAs[]> {
+    const what = 'reading the "Send mail as" settings';
+    const raw = await this.get(target, "settings/sendAs", {}, what);
+    if (!isRecord(raw)) throw this.malformed(target, what);
+    const list = raw["sendAs"] === undefined ? [] : raw["sendAs"];
+    if (!Array.isArray(list)) throw this.malformed(target, what);
+    const out: GmailSendAs[] = [];
+    for (const e of list) {
+      if (!isRecord(e) || typeof e["sendAsEmail"] !== "string") throw this.malformed(target, what);
+      out.push({
+        sendAsEmail: e["sendAsEmail"],
+        isPrimary: e["isPrimary"] === true,
+        isDefault: e["isDefault"] === true,
+        ...(typeof e["displayName"] === "string" ? { displayName: e["displayName"] } : {}),
+        ...(typeof e["treatAsAlias"] === "boolean" ? { treatAsAlias: e["treatAsAlias"] } : {}),
+        ...(typeof e["verificationStatus"] === "string" ? { verificationStatus: e["verificationStatus"] } : {}),
+      });
+    }
+    return out;
+  }
+
+  async createDraft(target: ResolvedMailbox, raw: string, threadId?: string): Promise<GmailDraftRef> {
+    if (threadId !== undefined) assertGmailId("thread", threadId, target.mailbox.address);
+    const out = await this.request(target, "POST", "drafts", {}, { message: { raw, ...(threadId !== undefined ? { threadId } : {}) } }, "creating a draft", "write");
+    return this.draftRef(target, out, "creating a draft");
+  }
+
+  async updateDraft(target: ResolvedMailbox, draftId: string, raw: string, threadId?: string): Promise<GmailDraftRef> {
+    assertGmailId("draft", draftId, target.mailbox.address);
+    if (threadId !== undefined) assertGmailId("thread", threadId, target.mailbox.address);
+    const what = `updating draft ${draftId}`;
+    const out = await this.request(target, "PUT", `drafts/${encodeURIComponent(draftId)}`, {}, { id: draftId, message: { raw, ...(threadId !== undefined ? { threadId } : {}) } }, what, "write");
+    return this.draftRef(target, out, what);
+  }
+
+  async getDraft(target: ResolvedMailbox, draftId: string, format: "full" | "metadata"): Promise<GmailDraft> {
+    assertGmailId("draft", draftId, target.mailbox.address);
+    const what = `reading draft ${draftId}`;
+    const raw = await this.get(target, `drafts/${encodeURIComponent(draftId)}`, { format }, what);
+    if (!isRecord(raw) || typeof raw["id"] !== "string" || !isRecord(raw["message"]) || typeof raw["message"]["id"] !== "string" || typeof raw["message"]["threadId"] !== "string") throw this.malformed(target, what);
+    return raw as unknown as GmailDraft;
+  }
+
+  async listDrafts(target: ResolvedMailbox, maxResults: number, pageToken?: string): Promise<GmailDraftListPage> {
+    const what = "listing drafts";
+    const raw = await this.get(target, "drafts", { maxResults: String(maxResults), pageToken }, what);
+    if (!isRecord(raw)) throw this.malformed(target, what);
+    const list = raw["drafts"] === undefined ? [] : raw["drafts"]; // omitted when there are none
+    if (!Array.isArray(list)) throw this.malformed(target, what);
+    const drafts = list.map((d) => this.draftRef(target, d, what));
+    const next = raw["nextPageToken"];
+    const estimate = raw["resultSizeEstimate"];
+    return { drafts, ...(typeof next === "string" && next.length > 0 ? { nextPageToken: next } : {}), ...(typeof estimate === "number" ? { resultSizeEstimate: estimate } : {}) };
+  }
+
+  async deleteDraft(target: ResolvedMailbox, draftId: string): Promise<void> {
+    assertGmailId("draft", draftId, target.mailbox.address);
+    await this.request(target, "DELETE", `drafts/${encodeURIComponent(draftId)}`, {}, undefined, `deleting draft ${draftId}`, "write");
+  }
+
+  /** drafts.send. The caller owns rule 5 (confirmation, three outcomes); this only reports what Gmail answered. */
+  async sendDraft(target: ResolvedMailbox, draftId: string): Promise<GmailSentRef> {
+    assertGmailId("draft", draftId, target.mailbox.address);
+    const what = `sending draft ${draftId}`;
+    const raw = await this.request(target, "POST", "drafts/send", {}, { id: draftId }, what, "write");
+    if (!isRecord(raw) || typeof raw["id"] !== "string" || typeof raw["threadId"] !== "string") throw this.malformed(target, what);
+    const labelIds = Array.isArray(raw["labelIds"]) ? raw["labelIds"].filter((l): l is string => typeof l === "string") : undefined;
+    return { id: raw["id"], threadId: raw["threadId"], ...(labelIds !== undefined ? { labelIds } : {}) };
+  }
+
+  private draftRef(target: ResolvedMailbox, raw: unknown, what: string): GmailDraftRef {
+    if (!isRecord(raw) || typeof raw["id"] !== "string" || !isRecord(raw["message"]) || typeof raw["message"]["id"] !== "string" || typeof raw["message"]["threadId"] !== "string") throw this.malformed(target, what);
+    const m = raw["message"];
+    const labelIds = Array.isArray(m["labelIds"]) ? m["labelIds"].filter((l): l is string => typeof l === "string") : undefined;
+    return { id: raw["id"], message: { id: m["id"] as string, threadId: m["threadId"] as string, ...(labelIds !== undefined ? { labelIds } : {}) } };
   }
 
   private malformed(target: ResolvedMailbox, what: string): GmailApiError {

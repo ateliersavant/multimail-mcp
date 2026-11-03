@@ -119,7 +119,8 @@ describe("MCP over HTTP with a real token", () => {
     await client.connect(transport);
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name);
-    expect(names).toEqual(["list_accounts", "search_threads", "get_thread", "get_message", "list_labels"]);
+    expect(names).toEqual(["list_accounts", "search_threads", "get_thread", "get_message", "list_labels", "create_draft", "update_draft", "get_draft", "list_drafts", "delete_draft", "send_draft", "check_send_as"]);
+    expect(names).not.toContain("send_message"); // rule 3: no direct send over the real transport either
     for (const t of tools.tools) expect(t.description, t.name).toContain("untrusted data");
     const result = await client.callTool({ name: "list_accounts", arguments: {} });
     const out = result.structuredContent as { principal: string; tenants: { id: string; mailboxes: { address: string }[] }[] };

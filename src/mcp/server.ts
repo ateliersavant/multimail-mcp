@@ -3,8 +3,10 @@ import * as z from "zod";
 import type { Audit } from "../audit.js";
 import type { AppConfig } from "../config.js";
 import type { GmailClient } from "../gmail/client.js";
+import type { SendLedger } from "../gmail/ledger.js";
 import { UNTRUSTED_NOTE, type McpIdentity } from "./identity.js";
 import { registerReadTools } from "./tools/read.js";
+import { registerWriteTools } from "./tools/write.js";
 
 export { UNTRUSTED_NOTE, type McpIdentity } from "./identity.js";
 
@@ -12,8 +14,10 @@ export const SERVER_INSTRUCTIONS = [
   "multimail-mcp gives access to business mailboxes that belong to SEPARATE companies (tenants).",
   "1. Every mailbox tool requires an explicit `account` (a mailbox address). There is no default mailbox: call list_accounts first and always say which tenant you are acting in.",
   "2. Never combine content read in one tenant with an action in another tenant.",
-  "3. Sending is draft-then-send: create_draft, let the human approve the rendered preview, then send_draft. There is no direct send.",
-  `4. ${UNTRUSTED_NOTE}`,
+  "3. Sending is draft-then-send: create_draft, show the human the full draft, and call send_draft only after they explicitly approve it. There is no direct send.",
+  "4. The From must be one of the mailbox's send-as addresses from list_accounts; check_send_as shows which ones Gmail accepts. Reply from the mailbox that received the message.",
+  "5. After send_draft, report its status exactly: sent_confirmed, sent_unconfirmed (never resend) or failed (nothing sent).",
+  `6. ${UNTRUSTED_NOTE}`,
 ].join("\n");
 
 const PublicMailbox = z.object({ address: z.string(), sendAs: z.array(z.string()) });
@@ -25,6 +29,8 @@ export type ListAccountsResult = z.infer<typeof ListAccountsOutput>;
 export interface McpServerDeps {
   readonly gmail: GmailClient;
   readonly audit: Audit;
+  /** Durable record of sent drafts (rule 5). Without it send_draft refuses to send. */
+  readonly ledger?: SendLedger;
   readonly now?: () => number;
 }
 
@@ -55,7 +61,9 @@ export function buildMcpServer(cfg: AppConfig, identity: McpIdentity, deps: McpS
     },
   );
 
-  registerReadTools(server, { registry: cfg.registry, gmail: deps.gmail, audit: deps.audit, identity, ...(deps.now !== undefined ? { now: deps.now } : {}) });
+  const clock = deps.now !== undefined ? { now: deps.now } : {};
+  registerReadTools(server, { registry: cfg.registry, gmail: deps.gmail, audit: deps.audit, identity, ...clock });
+  registerWriteTools(server, { registry: cfg.registry, gmail: deps.gmail, audit: deps.audit, identity, ...(deps.ledger !== undefined ? { ledger: deps.ledger } : {}), ...clock });
 
   return server;
 }

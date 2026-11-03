@@ -5,6 +5,7 @@ import { isAllowedPrincipal } from "../auth/principals.js";
 import { getConfig, type ConfigEnv } from "../config.js";
 import { GmailClient } from "../gmail/client.js";
 import { DelegationTokenSource } from "../gmail/delegation.js";
+import { KvSendLedger } from "../gmail/ledger.js";
 import { GOOGLE_EGRESS, createEgressFetch } from "../net/egress.js";
 import { buildMcpServer, type McpServerDeps } from "./server.js";
 
@@ -29,7 +30,10 @@ const handlers = new WeakMap<object, McpHttpHandler>();
 /** Per isolate per env: the delegation token cache lives here, so tokens are reused across requests and die with the isolate. */
 function depsFor(env: ConfigEnv): McpServerDeps {
   const tokens = new DelegationTokenSource({ secrets: env as Readonly<Record<string, unknown>>, fetch: egressFetch });
-  return { gmail: new GmailClient({ fetch: egressFetch, tokens }), audit };
+  // The Worker hands the OAuth layer an env whose OAUTH_KV is the strongly consistent Durable Object store; the send
+  // ledger shares it under its own key prefix. If it is ever absent, send_draft refuses to send (fail closed).
+  const kv = (env as { readonly OAUTH_KV?: KVNamespace }).OAUTH_KV;
+  return { gmail: new GmailClient({ fetch: egressFetch, tokens }), audit, ...(kv !== undefined ? { ledger: new KvSendLedger(kv) } : {}) };
 }
 
 function handlerFor(env: ConfigEnv): McpHttpHandler {

@@ -106,9 +106,106 @@ export function gmailMessage(spec: FakeMessageSpec): Json {
   };
 }
 
+export interface FakeSendAs {
+  readonly sendAsEmail: string;
+  readonly displayName?: string;
+  readonly isPrimary: boolean;
+  readonly isDefault: boolean;
+  readonly treatAsAlias?: boolean;
+  readonly verificationStatus?: string;
+}
+
 export interface FakeMailboxData {
   readonly labels: readonly { id: string; name: string; type: string }[];
   readonly messages: readonly FakeMessageSpec[];
+  /** Gmail's "Send mail as" list. Defaults to the primary address only. */
+  readonly sendAs?: readonly FakeSendAs[];
+}
+
+interface FakeDraft {
+  readonly id: string;
+  readonly messageId: string;
+  threadId: string;
+  raw: string;
+}
+
+interface FakeSent {
+  readonly id: string;
+  readonly threadId: string;
+  readonly labelIds: string[];
+  readonly payload: Json;
+  readonly internalDate: number;
+}
+
+/** What a sent message looked like, for assertions. Decoded header values; the body is not kept. */
+export interface SentLogEntry {
+  readonly account: string;
+  readonly draftId: string;
+  readonly messageId: string;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+function decodeB64Utf8(b64: string): string {
+  const bin = atob(b64.replace(/\s+/g, ""));
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+/** RFC 2047 "B" words back to text, removing the folding between adjacent words (as Gmail's API does). */
+function decodeWords(value: string): string {
+  return value.replace(/=\?UTF-8\?B\?([^?]*)\?=(?:\s+(?==\?UTF-8\?B\?))?/gi, (_, b64: string) => decodeB64Utf8(b64));
+}
+
+interface ParsedRaw {
+  readonly headers: { name: string; value: string }[];
+  readonly text?: string;
+  readonly html?: string;
+}
+
+function splitEntity(entity: string): { head: string; body: string } {
+  const i = entity.indexOf("\r\n\r\n");
+  return i < 0 ? { head: entity, body: "" } : { head: entity.slice(0, i), body: entity.slice(i + 4) };
+}
+
+function parseHead(head: string): { name: string; value: string }[] {
+  return head
+    .replace(/\r\n[ \t]/g, " ")
+    .split("\r\n")
+    .filter((l) => l.includes(":"))
+    .map((l) => ({ name: l.slice(0, l.indexOf(":")).trim(), value: decodeWords(l.slice(l.indexOf(":") + 1).trim()) }));
+}
+
+/** Parses the MIME the server builds (one text part, or multipart/alternative text + html, base64 bodies). */
+export function parseRaw(raw: string): ParsedRaw {
+  const mime = new TextDecoder().decode(b64urlDecode(raw));
+  const { head, body } = splitEntity(mime);
+  const headers = parseHead(head);
+  const ctype = headers.find((h) => h.name.toLowerCase() === "content-type")?.value ?? "text/plain";
+  const boundary = /boundary="([^"]+)"/.exec(ctype)?.[1];
+  if (boundary === undefined) return { headers, text: decodeB64Utf8(body) };
+  let text: string | undefined;
+  let html: string | undefined;
+  for (const part of body.split(`--${boundary}`)) {
+    const p = splitEntity(part.replace(/^\r\n/, ""));
+    const ph = parseHead(p.head);
+    const pt = ph.find((h) => h.name.toLowerCase() === "content-type")?.value ?? "";
+    if (pt.startsWith("text/plain")) text = decodeB64Utf8(p.body);
+    else if (pt.startsWith("text/html")) html = decodeB64Utf8(p.body);
+  }
+  return { headers, ...(text !== undefined ? { text } : {}), ...(html !== undefined ? { html } : {}) };
+}
+
+function payloadFrom(parsed: ParsedRaw): Json {
+  const headers = parsed.headers.filter((h) => h.name.toLowerCase() !== "content-type" && h.name.toLowerCase() !== "content-transfer-encoding");
+  if (parsed.html !== undefined) {
+    return { partId: "", mimeType: "multipart/alternative", filename: "", headers, body: { size: 0 }, parts: [textPart("text/plain", parsed.text ?? "", "0"), textPart("text/html", parsed.html, "1")] };
+  }
+  const part = textPart("text/plain", parsed.text ?? "", "");
+  return { ...part, headers: [...headers, ...(part["headers"] as Json[])] };
+}
+
+function metadataOf(payload: Json, wanted: readonly string[]): Json {
+  const headers = (payload["headers"] as { name: string; value: string }[]).filter((h) => wanted.length === 0 || wanted.includes(h.name.toLowerCase()));
+  return { mimeType: payload["mimeType"], headers };
 }
 
 export type ForcedFailure = { readonly status: number; readonly googleStatus?: string } | { readonly redirect: string } | undefined;
@@ -120,14 +217,57 @@ export class FakeGoogle {
   gmailFailure: ForcedFailure = undefined;
   /** Forced outcome for the token endpoint: an HTTP status and Google error code. */
   tokenFailure: { readonly status: number; readonly error: string } | undefined = undefined;
+  /** Forced outcome for drafts.send. `afterSend` = Gmail sends the message, then answers with this error (ambiguous). */
+  sendFailure: { readonly status: number; readonly googleStatus?: string; readonly afterSend?: boolean } | undefined = undefined;
+  /** Forced outcome for messages.get (used to break the post-send confirmation read). */
+  confirmFailure: { readonly status: number } | undefined = undefined;
+  /** Simulates Gmail ignoring the From and sending from the primary address. */
+  rewriteFromToPrimary = false;
+  /** Simulates Gmail not (yet) labelling a sent message SENT. */
+  omitSentLabel = false;
+  /** Every message Gmail sent, in order. */
+  readonly sentLog: SentLogEntry[] = [];
   private readonly tokens = new Map<string, string>(); // token -> impersonated mailbox
   private issued = 0;
+  private readonly sendAsLists = new Map<string, FakeSendAs[]>();
+  private readonly drafts = new Map<string, Map<string, FakeDraft>>();
+  private readonly sent = new Map<string, Map<string, FakeSent>>();
+  private counter = 0;
 
   constructor(
     /** Service accounts that may impersonate which mailboxes (one per tenant). */
     private readonly accounts: readonly { readonly sa: TestServiceAccount; readonly mailboxes: readonly string[] }[],
     private readonly data: Readonly<Record<string, FakeMailboxData>>,
-  ) {}
+  ) {
+    for (const [address, box] of Object.entries(data)) {
+      this.sendAsLists.set(address, [...(box.sendAs ?? [{ sendAsEmail: address, isPrimary: true, isDefault: true }])]);
+      this.drafts.set(address, new Map());
+      this.sent.set(address, new Map());
+    }
+  }
+
+  /** Replace a mailbox's "Send mail as" list (e.g. to make an alias pending or remove it). */
+  setSendAs(address: string, list: readonly FakeSendAs[]): void {
+    this.sendAsLists.set(address, [...list]);
+  }
+
+  /** The decoded headers and bodies of a stored draft, as Gmail holds them. */
+  draft(address: string, draftId: string): ParsedRaw | undefined {
+    const d = this.drafts.get(address)?.get(draftId);
+    return d === undefined ? undefined : parseRaw(d.raw);
+  }
+
+  draftIds(address: string): string[] {
+    return [...(this.drafts.get(address)?.keys() ?? [])];
+  }
+
+  /** Simulates someone editing a draft's From in the Gmail UI between create_draft and send_draft. */
+  editDraftFrom(address: string, draftId: string, newFrom: string): void {
+    const d = this.drafts.get(address)?.get(draftId);
+    if (d === undefined) throw new Error("no such draft");
+    const mime = new TextDecoder().decode(b64urlDecode(d.raw)).replace(/^From: .*$/m, `From: ${newFrom}`);
+    d.raw = b64urlEncode(utf8(mime));
+  }
 
   get tokensIssued(): number {
     return this.issued;
@@ -140,7 +280,10 @@ export class FakeGoogle {
     const auth = headers.get("authorization");
     this.calls.push({ method, path: url.pathname + url.search, bearer: auth !== null });
     if (url.origin === "https://oauth2.googleapis.com" && url.pathname === "/token") return this.token(method, init, input);
-    if (url.origin === "https://gmail.googleapis.com") return this.gmail(url, auth);
+    if (url.origin === "https://gmail.googleapis.com") {
+      const bodyText = init?.body !== undefined ? String(init.body) : input instanceof Request ? await input.text() : "";
+      return this.gmail(url, auth, method, bodyText);
+    }
     return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
   };
 
@@ -171,7 +314,7 @@ export class FakeGoogle {
     return json({ access_token: token, expires_in: 3600, token_type: "Bearer" });
   }
 
-  private gmail(url: URL, auth: string | null): Response {
+  private gmail(url: URL, auth: string | null, method: string, bodyText: string): Response {
     const m = /^\/gmail\/v1\/users\/([^/]+)\/(.*)$/.exec(url.pathname);
     if (m === null) return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
     const address = decodeURIComponent(m[1] as string);
@@ -187,6 +330,8 @@ export class FakeGoogle {
     }
     const box = this.data[address];
     if (box === undefined) return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
+    const write = this.gmailWrite(address, rest, method, bodyText, url);
+    if (write !== undefined) return write;
     if (rest === "labels") return json({ labels: box.labels });
     if (rest === "threads") {
       const q = (url.searchParams.get("q") ?? "").toLowerCase();
@@ -224,12 +369,87 @@ export class FakeGoogle {
     }
     const g = /^messages\/([^/?]+)$/.exec(rest);
     if (g !== null) {
+      if (this.confirmFailure !== undefined) return json({ error: { code: this.confirmFailure.status, status: "UNAVAILABLE" } }, this.confirmFailure.status);
       const id = decodeURIComponent(g[1] as string);
+      const format = url.searchParams.get("format") ?? "full";
+      const wanted = url.searchParams.getAll("metadataHeaders").map((h) => h.toLowerCase());
       const spec = box.messages.find((s) => s.id === id);
-      if (spec === undefined) return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
-      return json(gmailMessage(spec));
+      const sent = this.sent.get(address)?.get(id);
+      let full: Json;
+      if (spec !== undefined) full = gmailMessage(spec);
+      else if (sent !== undefined) full = { id: sent.id, threadId: sent.threadId, labelIds: [...sent.labelIds], snippet: "", historyId: "1", internalDate: String(sent.internalDate), sizeEstimate: 1000, payload: sent.payload };
+      else return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
+      if (format === "metadata") return json({ ...full, payload: metadataOf(full["payload"] as Json, wanted) });
+      return json(full);
     }
     return json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
+  }
+
+  /** settings/sendAs and the drafts API. Returns undefined for anything else. */
+  private gmailWrite(address: string, rest: string, method: string, bodyText: string, url: URL): Response | undefined {
+    const notFound = (): Response => json({ error: { code: 404, status: "NOT_FOUND" } }, 404);
+    const drafts = this.drafts.get(address) ?? new Map<string, FakeDraft>();
+    const draftJson = (d: FakeDraft, format: string): Json => {
+      const payload = payloadFrom(parseRaw(d.raw));
+      const message: Json = { id: d.messageId, threadId: d.threadId, labelIds: ["DRAFT"], snippet: "", historyId: "1", internalDate: "1793700000000", sizeEstimate: d.raw.length };
+      return { id: d.id, message: { ...message, payload: format === "metadata" ? metadataOf(payload, []) : payload } };
+    };
+    if (rest === "settings/sendAs" && method === "GET") return json({ sendAs: this.sendAsLists.get(address) ?? [] });
+    if (rest === "drafts" && method === "POST") {
+      const body = JSON.parse(bodyText) as { message?: { raw?: string; threadId?: string } };
+      if (typeof body.message?.raw !== "string") return json({ error: { code: 400, status: "INVALID_ARGUMENT" } }, 400);
+      this.counter++;
+      const d: FakeDraft = { id: `r-${this.counter}`, messageId: `dm-${this.counter}`, threadId: body.message.threadId ?? `t-new-${this.counter}`, raw: body.message.raw };
+      drafts.set(d.id, d);
+      return json({ id: d.id, message: { id: d.messageId, threadId: d.threadId, labelIds: ["DRAFT"] } });
+    }
+    if (rest === "drafts" && method === "GET") {
+      const all = [...drafts.values()].reverse();
+      const max = Number(url.searchParams.get("maxResults") ?? "100");
+      const start = Number(url.searchParams.get("pageToken") ?? "0");
+      const page = all.slice(start, start + max).map((d) => ({ id: d.id, message: { id: d.messageId, threadId: d.threadId } }));
+      const next = start + max < all.length ? String(start + max) : undefined;
+      return json(page.length === 0 ? { resultSizeEstimate: 0 } : { drafts: page, resultSizeEstimate: all.length, ...(next !== undefined ? { nextPageToken: next } : {}) });
+    }
+    if (rest === "drafts/send" && method === "POST") {
+      const body = JSON.parse(bodyText) as { id?: string };
+      const d = typeof body.id === "string" ? drafts.get(body.id) : undefined;
+      if (d === undefined) return notFound();
+      const f = this.sendFailure;
+      if (f !== undefined && f.afterSend !== true) return json({ error: { code: f.status, status: f.googleStatus ?? "UNKNOWN" } }, f.status);
+      drafts.delete(d.id);
+      this.counter++;
+      const parsed = parseRaw(d.raw);
+      let headers = parsed.headers;
+      if (this.rewriteFromToPrimary) {
+        const primary = (this.sendAsLists.get(address) ?? []).find((e) => e.isPrimary)?.sendAsEmail ?? address;
+        headers = headers.map((h) => (h.name.toLowerCase() === "from" ? { name: h.name, value: primary } : h));
+      }
+      const sent: FakeSent = { id: `sent-${this.counter}`, threadId: d.threadId, labelIds: this.omitSentLabel ? [] : ["SENT"], payload: payloadFrom({ ...parsed, headers }), internalDate: 1793700000000 + this.counter };
+      this.sent.get(address)?.set(sent.id, sent);
+      this.sentLog.push({ account: address, draftId: d.id, messageId: sent.id, headers: Object.fromEntries(headers.map((h) => [h.name.toLowerCase(), h.value])) });
+      if (f !== undefined) return json({ error: { code: f.status, status: f.googleStatus ?? "UNKNOWN" } }, f.status);
+      return json({ id: sent.id, threadId: sent.threadId, labelIds: [...sent.labelIds] });
+    }
+    const one = /^drafts\/([^/?]+)$/.exec(rest);
+    if (one !== null) {
+      const id = decodeURIComponent(one[1] as string);
+      const d = drafts.get(id);
+      if (d === undefined) return notFound();
+      if (method === "GET") return json(draftJson(d, url.searchParams.get("format") ?? "full"));
+      if (method === "DELETE") {
+        drafts.delete(id);
+        return new Response(null, { status: 204 });
+      }
+      if (method === "PUT") {
+        const body = JSON.parse(bodyText) as { id?: string; message?: { raw?: string; threadId?: string } };
+        if (body.id !== id || typeof body.message?.raw !== "string") return json({ error: { code: 400, status: "INVALID_ARGUMENT" } }, 400);
+        d.raw = body.message.raw;
+        if (body.message.threadId !== undefined) d.threadId = body.message.threadId;
+        return json({ id: d.id, message: { id: d.messageId, threadId: d.threadId, labelIds: ["DRAFT"] } });
+      }
+    }
+    return undefined;
   }
 
   private threads(box: FakeMailboxData): Map<string, FakeMessageSpec[]> {
@@ -251,8 +471,10 @@ function json(body: unknown, status = 200): Response {
 
 /** Two fictional tenants with a few threads each. Addresses match fixtures/tenants.example.json. */
 export const STUDIO_ADA = "ada@example-studio.test";
+export const STUDIO_ADA_ALIAS = "ada@example-studio-alias.test";
 export const STUDIO_HELLO = "hello@example-studio.test";
 export const LABS_GRACE = "grace@example-labs.test";
+export const LABS_PRESS = "press@example-labs.test";
 
 export function sampleMailboxes(): Record<string, FakeMailboxData> {
   const day = 24 * 3600 * 1000;
@@ -263,6 +485,12 @@ export function sampleMailboxes(): Record<string, FakeMailboxData> {
         { id: "INBOX", name: "INBOX", type: "system" },
         { id: "SENT", name: "SENT", type: "system" },
         { id: "Label_7", name: "Clients", type: "user" },
+      ],
+      sendAs: [
+        { sendAsEmail: STUDIO_ADA, displayName: "Ada Lovelace", isPrimary: true, isDefault: true },
+        // A Workspace domain alias: Gmail reports no verification status for it.
+        { sendAsEmail: STUDIO_ADA_ALIAS, displayName: "Ada Lovelace", isPrimary: false, isDefault: false, treatAsAlias: true },
+        { sendAsEmail: STUDIO_HELLO, displayName: "Example Studio", isPrimary: false, isDefault: false, treatAsAlias: true, verificationStatus: "accepted" },
       ],
       messages: [
         { id: "m-inv-1", threadId: "t-invoice", from: "Bill Supplier <bill@vendor.test>", to: STUDIO_ADA, subject: "Invoice 1042", date: "Sun, 1 Nov 2026 09:00:00 +0000", internalDate: t0, text: "Hello Ada,\n\nPlease find invoice 1042 attached.\n\nBill", attachments: [{ filename: "invoice-1042.pdf", mimeType: "application/pdf", size: 48213 }], labelIds: ["INBOX", "Label_7"] },
@@ -283,6 +511,10 @@ export function sampleMailboxes(): Record<string, FakeMailboxData> {
     [STUDIO_HELLO]: { labels: [{ id: "INBOX", name: "INBOX", type: "system" }], messages: [] },
     [LABS_GRACE]: {
       labels: [{ id: "INBOX", name: "INBOX", type: "system" }, { id: "Label_1", name: "Press", type: "user" }],
+      sendAs: [
+        { sendAsEmail: LABS_GRACE, displayName: "Grace", isPrimary: true, isDefault: true },
+        { sendAsEmail: LABS_PRESS, displayName: "Example Labs Press", isPrimary: false, isDefault: false, treatAsAlias: true, verificationStatus: "accepted" },
+      ],
       messages: [
         { id: "m-press-1", threadId: "t-press", from: "Reporter <r@paper.test>", to: LABS_GRACE, subject: "Interview request", date: "Mon, 2 Nov 2026 12:00:00 +0000", internalDate: t0 + day + 3 * 3600 * 1000, text: "Would Grace be available Thursday?", labelIds: ["INBOX", "Label_1"] },
       ],
