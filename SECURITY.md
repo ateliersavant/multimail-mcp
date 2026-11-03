@@ -2,7 +2,7 @@
 
 ## Reporting
 
-While this repository is private, report to its owner directly (a private issue reaches only collaborators). Once it is public, use GitHub's **private vulnerability reporting** (Security tab → Report a vulnerability), which GitHub offers for public repositories. Either way, include a description and reproduction and do not open a public issue for a vulnerability. We acknowledge within three working days.
+Use GitHub's **private vulnerability reporting** on this repository (Security tab → Report a vulnerability) with a description and reproduction. Please do not open a public issue for a vulnerability. We acknowledge within three working days.
 
 ## Threat model (summary)
 
@@ -17,6 +17,14 @@ While this repository is private, report to its owner directly (a private issue 
 | Duplicate send | Three-state send outcome; a retried `send_draft` on a sent draft returns an explicit error |
 | Log leakage | Telemetry is content-free by construction (metadata only) |
 | Dependency compromise | Pinned lockfile, CI audit, egress limited in code to Google OAuth and Gmail hosts with a CI grep for anything else |
+
+## Repository safeguards
+
+- Secret scanning with push protection, Dependabot alerts and security updates, and private vulnerability reporting are enabled.
+- `main` is protected: the `verify` and `secrets` checks are required, force pushes and deletion are blocked, history is linear.
+- GitHub Actions may run only GitHub-owned actions, with a read-only token; workflows from forks wait for maintainer approval.
+- CI scans the full git history with a pinned, checksum-verified gitleaks on every push, and checks the tree against a private denylist of real company names (held as an encrypted repository secret, reported as file and line only).
+- Nothing in this repository can deploy or configure a running server: deployments are made by the operator with their own Cloudflare credentials, which never touch GitHub.
 
 ## Enforcement is tested
 
