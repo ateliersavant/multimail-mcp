@@ -22,3 +22,6 @@ worker-configuration.d.ts
 
 # Real-name denylist for scripts/check-forbidden.mjs (names real companies; never commit)
 .forbidden-terms
+
+# Agent worktrees created by Claude Code sessions
+.claude/worktrees/

@@ -269,6 +269,26 @@ export class FakeGoogle {
     d.raw = b64urlEncode(utf8(mime));
   }
 
+  /** Simulates another client adding a header (e.g. Sender) to a stored draft. */
+  addDraftHeader(address: string, draftId: string, name: string, value: string): void {
+    const d = this.drafts.get(address)?.get(draftId);
+    if (d === undefined) throw new Error("no such draft");
+    const mime = new TextDecoder().decode(b64urlDecode(d.raw)).replace(/^(From: .*)$/m, `$1\r\n${name}: ${value}`);
+    d.raw = b64urlEncode(utf8(mime));
+  }
+
+  /** Simulates someone adding an HTML version to a draft outside multimail (Gmail UI, another client). */
+  editDraftHtml(address: string, draftId: string, html: string): void {
+    const d = this.drafts.get(address)?.get(draftId);
+    if (d === undefined) throw new Error("no such draft");
+    const p = parseRaw(d.raw);
+    const keep = p.headers.filter((h) => !/^content-(type|transfer-encoding)$/i.test(h.name)).map((h) => `${h.name}: ${h.value}`);
+    const b64 = (s: string): string => btoa(String.fromCharCode(...utf8(s)));
+    const part = (type: string, body: string): string[] => [`Content-Type: ${type}; charset=UTF-8`, "Content-Transfer-Encoding: base64", "", b64(body)];
+    const mime = [...keep, 'Content-Type: multipart/alternative; boundary="FAKE-ALT"', "", "--FAKE-ALT", ...part("text/plain", p.text ?? ""), "--FAKE-ALT", ...part("text/html", html), "--FAKE-ALT--", ""].join("\r\n");
+    d.raw = b64urlEncode(utf8(mime));
+  }
+
   get tokensIssued(): number {
     return this.issued;
   }

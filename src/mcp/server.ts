@@ -4,6 +4,7 @@ import type { Audit } from "../audit.js";
 import type { AppConfig } from "../config.js";
 import type { GmailClient } from "../gmail/client.js";
 import type { SendLedger } from "../gmail/ledger.js";
+import type { Limits, RateLimiter } from "../guard/ratelimit.js";
 import { UNTRUSTED_NOTE, type McpIdentity } from "./identity.js";
 import { registerReadTools } from "./tools/read.js";
 import { registerWriteTools } from "./tools/write.js";
@@ -31,6 +32,9 @@ export interface McpServerDeps {
   readonly audit: Audit;
   /** Durable record of sent drafts (rule 5). Without it send_draft refuses to send. */
   readonly ledger?: SendLedger;
+  /** Drafting and sending limits per principal. Without it send_draft refuses to send. */
+  readonly rateLimiter?: RateLimiter;
+  readonly limits?: Limits;
   readonly now?: () => number;
 }
 
@@ -63,7 +67,16 @@ export function buildMcpServer(cfg: AppConfig, identity: McpIdentity, deps: McpS
 
   const clock = deps.now !== undefined ? { now: deps.now } : {};
   registerReadTools(server, { registry: cfg.registry, gmail: deps.gmail, audit: deps.audit, identity, ...clock });
-  registerWriteTools(server, { registry: cfg.registry, gmail: deps.gmail, audit: deps.audit, identity, ...(deps.ledger !== undefined ? { ledger: deps.ledger } : {}), ...clock });
+  registerWriteTools(server, {
+    registry: cfg.registry,
+    gmail: deps.gmail,
+    audit: deps.audit,
+    identity,
+    ...(deps.ledger !== undefined ? { ledger: deps.ledger } : {}),
+    ...(deps.rateLimiter !== undefined ? { rateLimiter: deps.rateLimiter } : {}),
+    ...(deps.limits !== undefined ? { limits: deps.limits } : {}),
+    ...clock,
+  });
 
   return server;
 }

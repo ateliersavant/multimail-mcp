@@ -11,14 +11,16 @@ Each path below carries the date it was last **verified end-to-end** against thi
 3. The server redirects you to **Sign in with Google**. Only emails in the operator's allowlist receive a token; anyone else sees `403` and nothing else.
 4. The client stores the access and refresh tokens and calls `/mcp` with `Authorization: Bearer`.
 
-## Claude (web, desktop, iPhone / Android) — unverified
+## Claude (web, desktop, iPhone / Android) — web verified 2026-11-03
 
 1. Settings → Connectors → **Add custom connector**.
 2. Name `multimail`, URL `https://<host>/mcp`. Leave client id/secret empty: Claude registers itself. (If your org requires fixed credentials, the operator can pre-register a client and give you its id/secret instead.)
 3. Connect → Google sign-in → allow.
 4. In a conversation, enable the connector and ask Claude to call `list_accounts`.
 
-Claude's callback is `https://claude.ai/api/mcp/auth_callback`. On Team/Enterprise plans an Owner adds the connector for the workspace.
+Claude's callback is `https://claude.ai/api/mcp/auth_callback`.
+
+Claude keeps the tool list it fetched when the connector was connected. After the server gains tools (for example after an upgrade), open Settings, Connectors, this connector, and choose Disconnect then Connect; then start a new conversation. On Team/Enterprise plans an Owner adds the connector for the workspace.
 
 ## Claude Code — unverified
 

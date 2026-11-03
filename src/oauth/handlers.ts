@@ -5,7 +5,7 @@
 import { AuthorizationError, authorizationErrorRedirect, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import type { Audit } from "../audit.js";
 import { GOOGLE_AUTHORIZATION_ENDPOINT, GoogleJwks, SignInError, beginGoogleSignIn, completeGoogleSignIn } from "../auth/google.js";
-import { isAllowedPrincipal } from "../auth/principals.js";
+import { isAllowedPrincipal, workspaceDomainMatches } from "../auth/principals.js";
 import { getConfig, type ConfigEnv } from "../config.js";
 import { EgressDeniedError, type FetchLike } from "../net/egress.js";
 import { escapeHtml, page } from "./html.js";
@@ -22,12 +22,14 @@ interface UpstreamData {
 
 export interface DefaultHandlerDeps {
   readonly fetch: FetchLike;
-  readonly audit: Audit;
+  /** An Audit, or a resolver per env (the Worker resolves the D1-backed audit from its bindings). */
+  readonly audit: Audit | ((env: HandlerEnv) => Audit);
   readonly now?: () => number;
 }
 
 export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request: Request, env: HandlerEnv): Promise<Response> } {
   const now = deps.now ?? (() => Date.now());
+  const auditOf = (env: HandlerEnv): Audit => (typeof deps.audit === "function" ? deps.audit(env) : deps.audit);
   const jwks = new GoogleJwks(deps.fetch, now);
 
   async function authorizeGet(request: Request, env: HandlerEnv): Promise<Response> {
@@ -121,7 +123,7 @@ export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request:
       return new Response(null, { status: 302, headers });
     };
     if (params.get("error") !== null) {
-      await deps.audit.record({ tool: "authorize", outcome: "refused", errorCode: "google_denied", clientId: original.clientId });
+      await auditOf(env).record({ tool: "authorize", outcome: "refused", errorCode: "google_denied", clientId: original.clientId });
       return redirectWithError("access_denied", "Google sign-in was cancelled");
     }
     const code = params.get("code");
@@ -136,14 +138,18 @@ export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request:
         // Unexpected failure: log its type and the runtime's message (infrastructure text, never mail content).
         console.error(JSON.stringify({ sign_in_exception: e instanceof Error ? e.name : typeof e, detail: e instanceof Error ? e.message.slice(0, 200) : undefined }));
       }
-      await deps.audit.record({ tool: "authorize", outcome: "error", errorCode, clientId: original.clientId });
+      await auditOf(env).record({ tool: "authorize", outcome: "error", errorCode, clientId: original.clientId });
       return redirectWithError("server_error", "Google sign-in could not be verified");
     }
 
     // The gate. Nothing below runs for anyone who is not on the allowlist.
     if (!isAllowedPrincipal(cfg.allowedPrincipals, principal.email)) {
-      await deps.audit.record({ tool: "authorize", outcome: "refused", errorCode: "principal_not_allowed", principal: principal.email, clientId: original.clientId });
+      await auditOf(env).record({ tool: "authorize", outcome: "refused", errorCode: "principal_not_allowed", principal: principal.email, clientId: original.clientId });
       return redirectWithError("access_denied", "This Google account is not allowed to use this server");
+    }
+    if (!workspaceDomainMatches(principal.email, principal.hd, cfg.registry.tenants)) {
+      await auditOf(env).record({ tool: "authorize", outcome: "refused", errorCode: "workspace_domain_mismatch", principal: principal.email, clientId: original.clientId });
+      return redirectWithError("access_denied", "This Google account is not managed by the company's Google Workspace");
     }
 
     const { redirectTo } = await oauth.completeAuthorization({
@@ -153,7 +159,7 @@ export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request:
       scope: original.scope,
       props: { email: principal.email, sub: principal.sub },
     });
-    await deps.audit.record({ tool: "authorize", outcome: "ok", principal: principal.email, clientId: original.clientId });
+    await auditOf(env).record({ tool: "authorize", outcome: "ok", principal: principal.email, clientId: original.clientId });
     headers.set("location", redirectTo);
     return new Response(null, { status: 302, headers });
   }

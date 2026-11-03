@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PrincipalConfigError, isAllowedPrincipal, parseAllowedPrincipals } from "../../src/auth/principals.js";
+import { PrincipalConfigError, isAllowedPrincipal, parseAllowedPrincipals, workspaceDomainMatches } from "../../src/auth/principals.js";
 
 describe("ALLOWED_PRINCIPALS", () => {
   it("refuses to start on a missing, empty or malformed allowlist (rule 6)", () => {
@@ -19,5 +19,20 @@ describe("ALLOWED_PRINCIPALS", () => {
     for (const no of ["Ada@example-studio.test", "ada+x@example-studio.test", "ada@example-studio.test ", "grace@example-studio.test", "ada@example-studio.test.evil.test", ""]) {
       expect(isAllowedPrincipal(set, no), no).toBe(false);
     }
+  });
+});
+
+describe("Workspace domain (id_token hd)", () => {
+  const tenants = [{ domains: ["example-studio.test", "studio-alias.test"] }, { domains: ["example-labs.test"] }];
+  it("requires hd to be the address's domain or another domain of the same company", () => {
+    expect(workspaceDomainMatches("ada@example-studio.test", "example-studio.test", tenants)).toBe(true);
+    expect(workspaceDomainMatches("ada@studio-alias.test", "example-studio.test", tenants)).toBe(true);
+    expect(workspaceDomainMatches("ada@example-studio.test", "EXAMPLE-STUDIO.TEST", tenants)).toBe(true);
+  });
+  it("refuses a consumer account (no hd), another Workspace, and another company's domain", () => {
+    expect(workspaceDomainMatches("ada@example-studio.test", undefined, tenants)).toBe(false);
+    expect(workspaceDomainMatches("ada@example-studio.test", "attacker.test", tenants)).toBe(false);
+    expect(workspaceDomainMatches("ada@example-studio.test", "example-labs.test", tenants)).toBe(false);
+    expect(workspaceDomainMatches("ada@other.test", "example-studio.test", tenants)).toBe(false);
   });
 });

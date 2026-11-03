@@ -22,7 +22,7 @@ beforeAll(async () => {
 async function idTokenFor(email: string, nonce: string): Promise<string> {
   const nowSec = Math.floor(NOW / 1000);
   const header = b64urlEncode(utf8(JSON.stringify({ alg: "RS256", kid: KID, typ: "JWT" })));
-  const payload = b64urlEncode(utf8(JSON.stringify({ iss: "https://accounts.google.com", aud: CLIENT_ID, sub: `sub-${email}`, email, email_verified: true, iat: nowSec - 5, exp: nowSec + 3600, nonce })));
+  const payload = b64urlEncode(utf8(JSON.stringify({ iss: "https://accounts.google.com", aud: CLIENT_ID, sub: `sub-${email}`, email, email_verified: true, hd: email.slice(email.indexOf("@") + 1), iat: nowSec - 5, exp: nowSec + 3600, nonce })));
   const sig = new Uint8Array(await crypto.subtle.sign({ name: "RSASSA-PKCS1-v1_5" }, privateKey, utf8(`${header}.${payload}`)));
   return `${header}.${payload}.${b64urlEncode(sig)}`;
 }

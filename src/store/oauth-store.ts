@@ -8,6 +8,7 @@
  * and the authorization code was refused. A single Durable Object with SQLite storage has no such window.
  */
 import { DurableObject } from "cloudflare:workers";
+import { decide, type RateDecision } from "../guard/ratelimit.js";
 
 export interface StoredValue {
   readonly value: string;
@@ -66,6 +67,8 @@ export class OAuthStore extends DurableObject<Env> {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, expiration INTEGER, metadata TEXT)");
+      // Rate-limit windows (src/guard/ratelimit.ts). Keys hold an OAuth client id or principal and a limit name; no content.
+      ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS ratelimit (key TEXT PRIMARY KEY, window_start INTEGER NOT NULL, count INTEGER NOT NULL)");
       ctx.storage.sql.exec("CREATE INDEX IF NOT EXISTS kv_expiration ON kv (expiration)");
     });
   }
@@ -125,10 +128,58 @@ export class OAuthStore extends DurableObject<Env> {
     return { keys, list_complete: true };
   }
 
+  /**
+   * Atomic check-and-increment of one fixed window. Synchronous SQL with no await in between, so concurrent RPCs to this
+   * object are serialised by its input gate and cannot both pass a limit.
+   */
+  async hit(key: string, limit: number, windowSeconds: number, nowMs: number): Promise<RateDecision> {
+    const k = `${key}|${windowSeconds}`;
+    const row = this.ctx.storage.sql.exec<{ window_start: number; count: number }>("SELECT window_start, count FROM ratelimit WHERE key = ?", k).toArray()[0];
+    const r = decide(row === undefined ? undefined : { windowStart: row.window_start, count: row.count }, limit, windowSeconds, nowMs);
+    if (r.next !== undefined) {
+      this.ctx.storage.sql.exec("INSERT INTO ratelimit (key, window_start, count) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = excluded.count", k, r.next.windowStart, r.next.count);
+    }
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    return r.decision;
+  }
+
+  /**
+   * The send ledger's claim (src/gmail/ledger.ts), atomic like `hit`: returns the live entry's JSON when the draft is
+   * already sent or a send is in flight, otherwise records an in-flight marker that expires after `ttlSeconds` and
+   * returns null. Two concurrent sends of one draft can never both get null.
+   */
+  async ledgerClaim(key: string, sendingJson: string, ttlSeconds: number): Promise<string | null> {
+    const row = this.ctx.storage.sql.exec<Row>("SELECT key, value, expiration, metadata FROM kv WHERE key = ?", key).toArray()[0];
+    if (row !== undefined && (row.expiration === null || row.expiration > this.nowSeconds())) return row.value;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO kv (key, value, expiration, metadata) VALUES (?, ?, ?, NULL) ON CONFLICT(key) DO UPDATE SET value = excluded.value, expiration = excluded.expiration, metadata = NULL",
+      key,
+      sendingJson,
+      this.nowSeconds() + Math.max(1, Math.floor(ttlSeconds)),
+    );
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
+    return null;
+  }
+
+  /** Drops an in-flight marker; never a sent record. */
+  async ledgerRelease(key: string): Promise<void> {
+    const row = this.ctx.storage.sql.exec<{ value: string }>("SELECT value FROM kv WHERE key = ?", key).toArray()[0];
+    if (row === undefined) return;
+    let state: unknown;
+    try {
+      state = (JSON.parse(row.value) as { state?: unknown }).state;
+    } catch {
+      return;
+    }
+    if (state === "sending") this.ctx.storage.sql.exec("DELETE FROM kv WHERE key = ?", key);
+  }
+
   /** Hourly sweep of expired rows; reads already ignore them, this just reclaims space. */
   override async alarm(): Promise<void> {
+    // Windows older than two days can never matter again (the longest window is one day).
+    this.ctx.storage.sql.exec("DELETE FROM ratelimit WHERE window_start < ?", Math.floor(Date.now() / 1000) - 2 * 24 * 3600);
     this.ctx.storage.sql.exec("DELETE FROM kv WHERE expiration IS NOT NULL AND expiration <= ?", this.nowSeconds());
-    const remaining = this.ctx.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM kv WHERE expiration IS NOT NULL").one().n;
+    const remaining = this.ctx.storage.sql.exec<{ n: number }>("SELECT (SELECT count(*) FROM kv WHERE expiration IS NOT NULL) + (SELECT count(*) FROM ratelimit) AS n").one().n;
     if (remaining > 0) await this.ctx.storage.setAlarm(Date.now() + SWEEP_INTERVAL_MS);
   }
 }

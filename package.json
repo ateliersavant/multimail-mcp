@@ -20,7 +20,9 @@
     "verify": "npm run typecheck && vitest run && npm run check:egress && npm run check:forbidden && npm run check:tenants -- fixtures/tenants.example.json && npm run test:mutation",
     "deploy": "npm run verify && node scripts/deploy.mjs",
     "test:mutation": "node scripts/mutate.mjs",
-    "check:forbidden": "node scripts/check-forbidden.mjs"
+    "check:forbidden": "node scripts/check-forbidden.mjs",
+    "audit:export": "node scripts/audit-export.mjs",
+    "test:adversarial": "vitest run test/adversarial"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.2.4",

@@ -165,6 +165,28 @@ describe("MCP over HTTP with a real token", () => {
     expect(status).toBe(200); // the grant exists; only the per-call check stands in the way
     const r = await call("/mcp", { method: "POST", headers: mcpHeaders(token), body: INITIALIZE });
     expect(r.status).toBe(403);
+    // ...and the refusal is in the durable audit log, metadata only.
+    const audit = await env.AUDIT_DB.prepare("SELECT tool, outcome, error_code, principal FROM audit WHERE error_code = 'principal_not_allowed' ORDER BY id DESC LIMIT 1").first();
+    expect(audit).toEqual({ tool: "mcp", outcome: "refused", error_code: "principal_not_allowed", principal: "mallory@example-labs.test" });
+  });
+
+  it("rate-limits one client token: past the per-minute limit → 429 with Retry-After, audited; another client is unaffected", async () => {
+    const { token } = await tokenFor("ada@example-studio.test");
+    let limited: Response | undefined;
+    for (let i = 0; i < 85 && limited === undefined; i++) {
+      const r = await call("/mcp", { method: "POST", headers: mcpHeaders(token), body: INITIALIZE });
+      if (r.status === 429) limited = r;
+      else await r.body?.cancel();
+    }
+    expect(limited?.status).toBe(429);
+    expect(Number(limited?.headers.get("retry-after"))).toBeGreaterThan(0);
+    const body = (await limited?.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/Rate limit: at most 40 requests per minute/);
+    const audit = await env.AUDIT_DB.prepare("SELECT outcome, error_code FROM audit WHERE error_code = 'rate_limited' ORDER BY id DESC LIMIT 1").first();
+    expect(audit).toEqual({ outcome: "refused", error_code: "rate_limited" });
+    const other = await tokenFor("ada@example-studio.test"); // a different registered client
+    const ok = await call("/mcp", { method: "POST", headers: mcpHeaders(other.token), body: INITIALIZE });
+    expect(ok.status).toBe(200);
   });
 
   it("never yields a usable token for another resource (audience binding)", async () => {
@@ -175,5 +197,35 @@ describe("MCP over HTTP with a real token", () => {
     } else {
       expect(status).not.toBe(200);
     }
+  });
+});
+
+describe("which clients may exist (src/oauth/client-policy.ts at the Worker entry)", () => {
+  const register = (redirect: string, ip: string) =>
+    call("/oauth/register", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip }, body: JSON.stringify({ client_name: "x", redirect_uris: [redirect], token_endpoint_auth_method: "none", grant_types: ["authorization_code"], response_types: ["code"] }) });
+
+  it("refuses a registration whose redirect is not a supported client's host or loopback", async () => {
+    const r = await register("https://attacker.example.net/cb", "198.51.100.1");
+    expect(r.status).toBe(400);
+    expect(await json<{ error: string }>(r)).toMatchObject({ error: "invalid_redirect_uri" });
+    expect((await register("http://localhost:1455/cb", "198.51.100.1")).status).toBe(201);
+  });
+
+  it("refuses a metadata-document client id on another host at /authorize and at the token endpoint", async () => {
+    const off = "https://attacker.example.net/client";
+    const a = await call(`/authorize?${new URLSearchParams({ response_type: "code", client_id: off, redirect_uri: "https://attacker.example.net/cb", state: "s" })}`);
+    expect(a.status).toBe(400);
+    expect(await json<{ error: string }>(a)).toMatchObject({ error: "invalid_client" });
+    const body = `grant_type=authorization_code&code=x&client_id=${encodeURIComponent(off)}`;
+    const t = await call("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "content-length": String(body.length) }, body });
+    expect(t.status).toBe(400);
+  });
+
+  it("limits registrations per source address", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 11; i++) statuses.push((await register("http://127.0.0.1:9/cb", "203.0.113.77")).status);
+    expect(statuses.slice(0, 10).every((s) => s === 201)).toBe(true);
+    expect(statuses[10]).toBe(429);
+    expect((await register("http://127.0.0.1:9/cb", "203.0.113.78")).status).toBe(201); // another address is unaffected
   });
 });

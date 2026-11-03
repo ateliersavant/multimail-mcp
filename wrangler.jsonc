@@ -12,6 +12,10 @@
   // strongly consistent, unlike KV, whose cross-location lag refused a valid authorization code on 2026-11-03.
   "durable_objects": { "bindings": [{ "name": "OAUTH_STORE", "class_name": "OAuthStore" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OAuthStore"] }],
+  // Content-free audit log, kept 90 days. The real database_id comes from the git-ignored deploy.local.json at deploy time.
+  "d1_databases": [{ "binding": "AUDIT_DB", "database_name": "multimail-mcp-audit", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }],
+  // Daily audit retention run (03:17 UTC).
+  "triggers": { "crons": ["17 3 * * *"] },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   // Secrets are set with `wrangler secret put`, never written here. Listing them lets `wrangler types` know about them.
   "secrets": { "required": ["PUBLIC_URL", "TENANTS_JSON", "ALLOWED_PRINCIPALS", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] }

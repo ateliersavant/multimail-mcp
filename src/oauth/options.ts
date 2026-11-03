@@ -1,5 +1,6 @@
 import type { OAuthProviderOptions } from "@cloudflare/workers-oauth-provider";
 import type { AppConfig } from "../config.js";
+import { registrationPolicy } from "./client-policy.js";
 
 export const SCOPE_MAIL = "mail";
 
@@ -29,6 +30,8 @@ export function buildProviderOptions<Env>(cfg: AppConfig, handlers: ProviderHand
     refreshTokenTTL: 30 * 24 * 60 * 60, // 30 d hard cap
     refreshTokenIdleTTL: 7 * 24 * 60 * 60, // 7 d without use
     clientRegistrationTTL: 90 * 24 * 60 * 60,
+    // Open registration, but only for redirect URIs on a supported client's host or on loopback (client-policy.ts).
+    clientRegistrationCallback: registrationPolicy(cfg.clients.redirectHosts),
     onError: ({ code, status, description, internal }) => {
       // Library constants only (code, status, its fixed description and internal reason); never request content.
       console.warn(JSON.stringify({ oauth_error: code, status, description, category: internal.category, reason: internal.reason }));

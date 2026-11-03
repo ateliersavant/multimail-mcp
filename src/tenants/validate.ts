@@ -157,8 +157,10 @@ export function loadTenantConfig(jsonText: string): TenantConfig {
   let decoded: unknown;
   try {
     decoded = JSON.parse(jsonText);
-  } catch (e) {
-    throw new TenantConfigError([`$: not valid JSON (${e instanceof Error ? e.message : String(e)})`]);
+  } catch {
+    // The parser's own message quotes part of the input (real addresses and domains) and this ends up in the Worker
+    // log, so only the fact is reported. `npm run check:tenants` shows the exact position locally.
+    throw new TenantConfigError(["$: not valid JSON (run npm run check:tenants on the file to see where)"]);
   }
   return parseTenantConfig(decoded);
 }

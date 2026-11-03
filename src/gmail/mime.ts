@@ -5,11 +5,11 @@
  * from an existing message are untrusted and are kept only if they are well-formed message-id lists.
  */
 import { b64urlEncode, utf8 } from "../auth/encoding.js";
+import { parseAddressList, singleMailbox } from "./address.js";
 
 export const MAX_RECIPIENTS = 50;
 export const MAX_SUBJECT_CHARS = 500;
 export const MAX_BODY_TEXT_CHARS = 100_000;
-export const MAX_BODY_HTML_CHARS = 200_000;
 const MAX_DISPLAY_NAME_CHARS = 100;
 const MAX_REFERENCES = 50;
 
@@ -97,11 +97,23 @@ export interface MimeInput {
   readonly bcc?: readonly string[];
   readonly subject: string;
   readonly text: string;
-  readonly html?: string;
   readonly inReplyTo?: string;
   readonly references?: string;
-  /** Tests only: a fixed multipart boundary. */
-  readonly boundary?: string;
+}
+
+/** `Name: a, b, c` folded with CRLF + space so no line exceeds 78 characters (each item is short and unbreakable). */
+function foldList(name: string, items: readonly string[], separator: string): string {
+  const lines: string[] = [];
+  let line = `${name}:`;
+  items.forEach((item, idx) => {
+    const piece = `${item}${idx < items.length - 1 ? separator : ""}`;
+    if (line.length + 1 + piece.length > 78 && line !== `${name}:`) {
+      lines.push(line);
+      line = ` ${piece}`;
+    } else line += ` ${piece}`;
+  });
+  lines.push(line);
+  return lines.join("\r\n");
 }
 
 export function recipientCount(i: Pick<MimeInput, "to" | "cc" | "bcc">): number {
@@ -119,36 +131,22 @@ export function buildMime(i: MimeInput): string {
   assertHeaderSafe("subject", i.subject);
   if (i.subject.length > MAX_SUBJECT_CHARS) throw new MimeError("subject_too_long", `The subject is longer than ${MAX_SUBJECT_CHARS} characters.`);
   if (i.text.length > MAX_BODY_TEXT_CHARS) throw new MimeError("body_too_large", `body_text is longer than ${MAX_BODY_TEXT_CHARS} characters.`);
-  if (i.html !== undefined && i.html.length > MAX_BODY_HTML_CHARS) throw new MimeError("body_too_large", `body_html is longer than ${MAX_BODY_HTML_CHARS} characters.`);
   if (i.inReplyTo !== undefined) assertHeaderSafe("in-reply-to", i.inReplyTo);
   if (i.references !== undefined) assertHeaderSafe("references", i.references);
 
-  const headers: string[] = [`From: ${formatMailbox(i.from.address, i.from.displayName)}`, `To: ${i.to.join(", ")}`];
-  if ((i.cc ?? []).length > 0) headers.push(`Cc: ${(i.cc ?? []).join(", ")}`);
-  if ((i.bcc ?? []).length > 0) headers.push(`Bcc: ${(i.bcc ?? []).join(", ")}`);
+  const headers: string[] = [`From: ${formatMailbox(i.from.address, i.from.displayName)}`, foldList("To", i.to, ",")];
+  if ((i.cc ?? []).length > 0) headers.push(foldList("Cc", i.cc ?? [], ","));
+  if ((i.bcc ?? []).length > 0) headers.push(foldList("Bcc", i.bcc ?? [], ","));
   headers.push(`Subject: ${encodeWords(i.subject)}`);
   const inReplyTo = sanitiseMessageIds(i.inReplyTo, 1);
   const references = sanitiseMessageIds(i.references);
   if (inReplyTo !== undefined) headers.push(`In-Reply-To: ${inReplyTo}`);
-  if (references !== undefined) headers.push(`References: ${references}`);
+  if (references !== undefined) headers.push(foldList("References", references.split(" "), ""));
   headers.push("MIME-Version: 1.0");
 
+  // One plain-text part and nothing else: what the user approves is exactly what every recipient's client shows.
   const textPart = ["Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", base64Lines(i.text)];
-  if (i.html === undefined) return [...headers, ...textPart, ""].join("\r\n");
-
-  const boundary = i.boundary ?? `mm-${crypto.randomUUID()}`;
-  const htmlPart = ["Content-Type: text/html; charset=UTF-8", "Content-Transfer-Encoding: base64", "", base64Lines(i.html)];
-  return [
-    ...headers,
-    `Content-Type: multipart/alternative; boundary="${boundary}"`,
-    "",
-    `--${boundary}`,
-    ...textPart,
-    `--${boundary}`,
-    ...htmlPart,
-    `--${boundary}--`,
-    "",
-  ].join("\r\n");
+  return [...headers, ...textPart, ""].join("\r\n");
 }
 
 /** Gmail's `raw` field: the whole message, base64url without padding. */
@@ -156,17 +154,14 @@ export function toGmailRaw(mime: string): string {
   return b64urlEncode(utf8(mime));
 }
 
-/** The address inside a From/To header value (`Name <a@b>` or `a@b`), lowercased; undefined if none. */
+/** The single sender of a From value (`Name <a@b>` or `a@b`), lowercased; undefined unless it is exactly one mailbox. */
 export function extractAddress(headerValue: string | undefined): string | undefined {
-  if (headerValue === undefined) return undefined;
-  const angle = /<([^<>\s]+@[^<>\s]+)>\s*$/.exec(headerValue);
-  const candidate = (angle?.[1] ?? headerValue).trim().toLowerCase();
-  return /^[^\s<>,;"]+@[^\s<>,;"]+$/.test(candidate) ? candidate : undefined;
+  return singleMailbox(headerValue);
 }
 
-/** Distinct addresses mentioned across header values (for counting and display, never for routing). */
+/** Distinct addresses across header values, read as RFC 5322 address lists (quoted names never count as addresses). */
 export function addressesIn(...headerValues: readonly (string | undefined)[]): string[] {
   const out = new Set<string>();
-  for (const v of headerValues) for (const m of (v ?? "").matchAll(/[^\s<>,;:"()]+@[^\s<>,;:"()]+/g)) out.add(m[0].toLowerCase());
+  for (const v of headerValues) for (const m of parseAddressList(v ?? "").mailboxes) out.add(m.address.toLowerCase());
   return [...out];
 }

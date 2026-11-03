@@ -14,11 +14,12 @@
 import type { CallToolResult, McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod";
 import type { Audit } from "../../audit.js";
-import { GmailApiError, type GmailDraftRef } from "../../gmail/client.js";
+import { GmailApiError, assertGmailId, type GmailDraftRef } from "../../gmail/client.js";
 import { DelegationError } from "../../gmail/delegation.js";
 import type { SendLedger } from "../../gmail/ledger.js";
-import { MAX_BODY_HTML_CHARS, MAX_BODY_TEXT_CHARS, MAX_RECIPIENTS, MAX_SUBJECT_CHARS, MimeError, addressesIn, buildMime, extractAddress, replySubject, sanitiseMessageIds, toGmailRaw } from "../../gmail/mime.js";
-import { renderHeaders, renderMessage } from "../../gmail/render.js";
+import { DEFAULT_LIMITS, type Limits, type RateLimiter } from "../../guard/ratelimit.js";
+import { MAX_BODY_TEXT_CHARS, MAX_RECIPIENTS, MAX_SUBJECT_CHARS, MimeError, addressesIn, buildMime, extractAddress, replySubject, sanitiseMessageIds, toGmailRaw } from "../../gmail/mime.js";
+import { MAX_BODY_CHARS, htmlPartText, renderHeaders, renderMessage } from "../../gmail/render.js";
 import { SendAsError, assessSendAs, requireSendAs } from "../../gmail/sendas.js";
 import { EgressDeniedError } from "../../net/egress.js";
 import { type ResolvedMailbox, type TenantRegistry, UnknownAccountError } from "../../tenants/registry.js";
@@ -29,7 +30,7 @@ export const DRAFT_LIST_CAP = 25;
 const DRAFT_LIST_DEFAULT = 10;
 const CONFIRM_HEADERS = ["From", "To", "Cc", "Subject", "Date"] as const;
 
-export type WriteRefusalCode = "already_sent" | "send_in_progress" | "draft_not_found" | "draft_from_missing" | "no_recipients" | "subject_required" | "reply_not_found" | "ledger_unavailable";
+export type WriteRefusalCode = "already_sent" | "send_in_progress" | "draft_not_found" | "draft_from_missing" | "no_recipients" | "subject_required" | "reply_not_found" | "ledger_unavailable" | "rate_limited" | "rate_limiter_unavailable" | "draft_from_ambiguous";
 
 /** A refusal with an operator- and model-safe message. Nothing was created, changed or sent. */
 export class WriteRefusal extends Error {
@@ -49,6 +50,9 @@ export interface WriteToolDeps {
   readonly identity: McpIdentity;
   /** Required by send_draft; without it sending is refused (fail closed). */
   readonly ledger?: SendLedger;
+  /** Required by send_draft; drafts are limited when present. */
+  readonly rateLimiter?: RateLimiter;
+  readonly limits?: Limits;
   readonly now?: () => number;
 }
 
@@ -61,8 +65,7 @@ const Content = {
   cc: z.array(Address).max(MAX_RECIPIENTS).optional(),
   bcc: z.array(Address).max(MAX_RECIPIENTS).optional(),
   subject: z.string().max(MAX_SUBJECT_CHARS).optional().describe('Required for a new message. For a reply it defaults to "Re: <original subject>".'),
-  body_text: z.string().min(1).max(MAX_BODY_TEXT_CHARS).describe("Plain-text body. Always required: it is what the user reads and approves."),
-  body_html: z.string().max(MAX_BODY_HTML_CHARS).optional().describe("Optional HTML version of the same text."),
+  body_text: z.string().min(1).max(MAX_BODY_TEXT_CHARS).describe("The body, plain text only. Exactly this text is sent: there is no separate HTML version, so what the user approves is what recipients read."),
   reply_to_message_id: z.string().min(1).max(128).optional().describe("To reply: a message id from get_thread in THIS mailbox. Sets the thread and the In-Reply-To/References headers."),
 };
 
@@ -81,11 +84,10 @@ export const DraftPreviewOutput = z.object({
   bcc: z.array(z.string()),
   subject: z.string(),
   bodyText: z.string(),
-  hasHtml: z.boolean(),
   isReply: z.boolean(),
   approval: z.string(),
 });
-export const GetDraftOutput = z.object({ ...Echo, draftId: z.string(), message: Message });
+export const GetDraftOutput = z.object({ ...Echo, draftId: z.string(), message: Message, htmlText: z.string().nullable(), htmlTruncated: z.boolean() });
 const DraftSummary = z.object({ draftId: z.string(), messageId: z.string(), threadId: z.string(), from: z.string().nullable(), to: z.string().nullable(), subject: z.string().nullable(), date: z.string().nullable() });
 export const ListDraftsOutput = z.object({ ...Echo, drafts: z.array(DraftSummary), nextPageToken: z.string().nullable() });
 export const DeleteDraftOutput = z.object({ ...Echo, draftId: z.string(), deleted: z.literal(true) });
@@ -124,7 +126,7 @@ function classify(e: unknown): { readonly outcome: "refused" | "error"; readonly
   if (e instanceof UnknownAccountError) return { outcome: "refused", code: "unknown_account" };
   if (e instanceof SendAsError) return { outcome: "refused", code: e.code };
   if (e instanceof MimeError) return { outcome: "refused", code: e.code };
-  if (e instanceof WriteRefusal) return { outcome: e.code === "ledger_unavailable" ? "error" : "refused", code: e.code };
+  if (e instanceof WriteRefusal) return { outcome: e.code === "ledger_unavailable" || e.code === "rate_limiter_unavailable" ? "error" : "refused", code: e.code };
   if (e instanceof DelegationError) return { outcome: "error", code: e.code };
   if (e instanceof GmailApiError) return { outcome: "error", code: e.code };
   if (e instanceof EgressDeniedError) return { outcome: "error", code: "egress_denied" };
@@ -134,7 +136,12 @@ function classify(e: unknown): { readonly outcome: "refused" | "error"; readonly
 function loud(e: unknown): Error {
   if (e instanceof UnknownAccountError || e instanceof SendAsError || e instanceof MimeError || e instanceof WriteRefusal || e instanceof DelegationError || e instanceof GmailApiError) return e;
   if (e instanceof EgressDeniedError) return new Error(`Refused to contact a host outside the egress allowlist. ${e.message}`);
-  return new Error("The mailbox call failed before any result was produced (internal error; see the server log). Nothing was sent.");
+  return new Error('The mailbox call failed with an internal error before its result could be confirmed (see the server log). Do not assume nothing happened: for a send, check Sent with search_threads (query "in:sent newer_than:1d") before trying again.');
+}
+
+/** Every value of one header exactly as Gmail returned it: untruncated, unrendered. For security decisions only. */
+function rawHeaderValues(headers: readonly { readonly name: string; readonly value: string }[], name: string): string[] {
+  return headers.filter((h) => typeof h.name === "string" && typeof h.value === "string" && h.name.toLowerCase() === name).map((h) => h.value);
 }
 
 function ok<T>(out: T, isError = false): CallToolResult {
@@ -184,7 +191,6 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     readonly bcc?: readonly string[] | undefined;
     readonly subject?: string | undefined;
     readonly body_text: string;
-    readonly body_html?: string | undefined;
     readonly reply_to_message_id?: string | undefined;
   }
   interface Carry {
@@ -233,14 +239,13 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
       bcc,
       subject,
       text: input.body_text,
-      ...(input.body_html !== undefined ? { html: input.body_html } : {}),
       ...(inReplyTo !== undefined ? { inReplyTo } : {}),
       ...(references !== undefined ? { references } : {}),
     });
     return {
       raw: toGmailRaw(mime),
       ...(threadId !== undefined ? { threadId } : {}),
-      preview: { from: input.from, to: [...input.to], cc, bcc, subject, bodyText: input.body_text, hasHtml: input.body_html !== undefined, isReply: inReplyTo !== undefined },
+      preview: { from: input.from, to: [...input.to], cc, bcc, subject, bodyText: input.body_text, isReply: inReplyTo !== undefined },
     };
   }
 
@@ -249,6 +254,25 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
   }
 
   const previewMeta = (out: DraftPreview): AuditMeta => ({ draftId: out.draftId, messageId: out.messageId, threadId: out.threadId, recipientCount: out.to.length + out.cc.length + out.bcc.length });
+
+  const limits = deps.limits ?? DEFAULT_LIMITS;
+  const inMinutes = (s: number): string => (s < 120 ? `${s} s` : `${Math.ceil(s / 60)} min`);
+
+  /** Draft spam guard: per principal per hour. Drafts send nothing, so a missing limiter only skips the check. */
+  async function limitDrafts(): Promise<void> {
+    if (deps.rateLimiter === undefined) return;
+    const d = await deps.rateLimiter.hit(`draft:${identity.principal}`, limits.draftsPerHour, 3600);
+    if (!d.allowed) throw new WriteRefusal("rate_limited", `Draft limit reached: at most ${limits.draftsPerHour} drafts created or updated per hour. Try again in ${inMinutes(d.retryAfterSeconds)}. Nothing was changed.`);
+  }
+
+  /** Sending limits per principal (all mailboxes together): per day, then per hour. Fail closed without a limiter. */
+  async function limitSends(): Promise<void> {
+    if (deps.rateLimiter === undefined) throw new WriteRefusal("rate_limiter_unavailable", "Sending is unavailable: the server cannot enforce its sending limits, so it refuses to send. Nothing was sent.");
+    const day = await deps.rateLimiter.hit(`send:${identity.principal}`, limits.sendsPerDay, 86_400);
+    if (!day.allowed) throw new WriteRefusal("rate_limited", `Sending limit reached: at most ${limits.sendsPerDay} emails per day. Try again in ${inMinutes(day.retryAfterSeconds)}. Nothing was sent; the draft is unchanged.`);
+    const hour = await deps.rateLimiter.hit(`send:${identity.principal}`, limits.sendsPerHour, 3600);
+    if (!hour.allowed) throw new WriteRefusal("rate_limited", `Sending limit reached: at most ${limits.sendsPerHour} emails per hour. Try again in ${inMinutes(hour.retryAfterSeconds)}. Nothing was sent; the draft is unchanged.`);
+  }
 
   function requireLedger(): SendLedger {
     if (deps.ledger === undefined) throw new WriteRefusal("ledger_unavailable", "Sending is unavailable: the server cannot record sent drafts, so it refuses to send rather than risk a duplicate. Nothing was sent.");
@@ -260,7 +284,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     {
       title: "Create draft",
       description: `Create a draft in one mailbox, from one of its send-as addresses. Nothing is sent. The From must be on the mailbox's list in list_accounts AND accepted by Gmail (see check_send_as); otherwise the draft is refused. To reply, pass reply_to_message_id from get_thread in the SAME mailbox: the draft joins that thread with the right headers and a "Re:" subject. Returns the full draft for the user to approve; then call send_draft. Every result echoes the \`tenant\`: state it. Never draft content from one company into another company's mailbox. ${UNTRUSTED_NOTE}`,
-      inputSchema: z.object({ account: Account, ...Content }),
+      inputSchema: z.object({ account: Account, ...Content }).strict(),
       outputSchema: DraftPreviewOutput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -269,6 +293,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         "create_draft",
         input.account,
         async (target) => {
+          await limitDrafts();
           const c = await compose(target, input);
           const ref = await deps.gmail.createDraft(target, c.raw, c.threadId);
           return previewOf(target, ref, c.preview);
@@ -283,7 +308,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     {
       title: "Update draft",
       description: `Replace the whole content of an existing draft (From, recipients, subject, body). Nothing is sent. Same From checks as create_draft. A reply draft keeps its thread and reply headers unless reply_to_message_id is given again; the subject is kept if omitted. Refused for a draft that was already sent. Returns the full updated draft for the user to approve. Every result echoes the \`tenant\`: state it. ${UNTRUSTED_NOTE}`,
-      inputSchema: z.object({ account: Account, draft_id: DraftId, ...Content }),
+      inputSchema: z.object({ account: Account, draft_id: DraftId, ...Content }).strict(),
       outputSchema: DraftPreviewOutput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     },
@@ -309,6 +334,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
             ...(references !== undefined ? { references } : {}),
             ...(h.subject !== undefined ? { subject: h.subject } : {}),
           };
+          await limitDrafts();
           const c = await compose(target, input, carry);
           const ref = await deps.gmail.updateDraft(target, input.draft_id, c.raw, c.threadId);
           return previewOf(target, ref, c.preview);
@@ -333,7 +359,8 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
         input.account,
         async (target) => {
           const d = await deps.gmail.getDraft(target, input.draft_id, "full");
-          return { tenant: target.tenant.id, account: target.mailbox.address, draftId: d.id, message: renderMessage(d.message) };
+          const html = htmlPartText(d.message.payload, MAX_BODY_CHARS);
+          return { tenant: target.tenant.id, account: target.mailbox.address, draftId: d.id, message: renderMessage(d.message), htmlText: html?.text ?? null, htmlTruncated: html?.truncated ?? false };
         },
         (out) => ({ draftId: out.draftId, messageId: out.message.messageId, threadId: out.message.threadId }),
       ),
@@ -442,64 +469,95 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
     const account = t.mailbox.address;
     const base = { tenant: t.tenant.id, account, draftId };
     const empty = { messageId: null, threadId: null, from: null, to: null, subject: null, internalDate: null, fromMatches: null };
+    assertGmailId("draft", draftId, account);
 
-    const prior = await ledger.lookup(account, draftId);
-    if (prior?.state === "sent") {
-      throw new WriteRefusal("already_sent", `Draft ${draftId} in ${account} was already sent as message ${prior.record.messageId} (thread ${prior.record.threadId}). Do not send it again and do not recreate it; use get_message with that id to show the sent message.`);
-    }
-    if (prior?.state === "sending") {
-      throw new WriteRefusal("send_in_progress", `A send of draft ${draftId} in ${account} started ${Math.round((now() - prior.since) / 1000)} s ago and has not finished. Do not retry; in a minute, check Sent with search_threads (query "in:sent newer_than:1d").`);
-    }
-
-    let draft;
-    try {
-      draft = await deps.gmail.getDraft(t, draftId, "metadata");
-    } catch (e) {
-      if (e instanceof GmailApiError && e.code === "gmail_not_found") {
-        throw new WriteRefusal("draft_not_found", `No draft ${draftId} in ${account}. It may have been sent or deleted outside multimail: check Sent with search_threads (query "in:sent newer_than:1d") before creating anything again.`);
+    // Atomic claim before anything else: a concurrent send_draft for the same draft (a client retry, parallel tool
+    // calls) is refused here and never reaches Gmail.
+    const claim = await ledger.claim(account, draftId, now());
+    if (!claim.claimed) {
+      if (claim.entry.state === "sent") {
+        throw new WriteRefusal("already_sent", `Draft ${draftId} in ${account} was already sent as message ${claim.entry.record.messageId} (thread ${claim.entry.record.threadId}). Do not send it again and do not recreate it; use get_message with that id to show the sent message.`);
       }
+      throw new WriteRefusal("send_in_progress", `A send of draft ${draftId} in ${account} started ${Math.round((now() - claim.entry.since) / 1000)} s ago and has not finished. Do not retry; in a minute, check Sent with search_threads (query "in:sent newer_than:1d").`);
+    }
+
+    let fromAddress: string;
+    let recipients: number;
+    try {
+      let draft;
+      try {
+        draft = await deps.gmail.getDraft(t, draftId, "metadata");
+      } catch (e) {
+        if (e instanceof GmailApiError && e.code === "gmail_not_found") {
+          throw new WriteRefusal("draft_not_found", `No draft ${draftId} in ${account}. It may have been sent or deleted outside multimail: check Sent with search_threads (query "in:sent newer_than:1d") before creating anything again.`);
+        }
+        throw e;
+      }
+      // Rule 4 on the draft exactly as Gmail holds it now (it may have been edited elsewhere): the full, untruncated
+      // header values, exactly one From header naming exactly one mailbox, and no different Sender.
+      const raw = draft.message.payload?.headers ?? [];
+      const froms = rawHeaderValues(raw, "from");
+      const single = froms.length === 1 ? extractAddress(froms[0]) : undefined;
+      if (single === undefined) {
+        throw new WriteRefusal("draft_from_ambiguous", `Draft ${draftId} in ${account} does not name exactly one sender (${froms.length} From header(s), or a From with several or unreadable addresses), so Gmail could send it from an address nobody checked. Refused; set the From with update_draft.`);
+      }
+      const senders = rawHeaderValues(raw, "sender");
+      if (senders.some((s) => extractAddress(s) !== single)) {
+        throw new WriteRefusal("draft_from_ambiguous", `Draft ${draftId} in ${account} carries a Sender header that differs from its From. Refused; recreate the draft with create_draft.`);
+      }
+      fromAddress = single;
+      requireSendAs(t, fromAddress, await deps.gmail.listSendAs(t));
+      recipients = addressesIn(...rawHeaderValues(raw, "to"), ...rawHeaderValues(raw, "cc"), ...rawHeaderValues(raw, "bcc")).length;
+      if (recipients === 0) throw new WriteRefusal("no_recipients", `Draft ${draftId} in ${account} has no recipients. Nothing was sent.`);
+      // Counted only for sends that passed every check above, so refusals never use up the quota.
+      await limitSends();
+    } catch (e) {
+      await ledger.release(account, draftId).catch(() => undefined);
       throw e;
     }
-    const h = renderHeaders(draft.message.payload);
-    const fromAddress = extractAddress(h.from);
-    if (fromAddress === undefined) throw new WriteRefusal("draft_from_missing", `Draft ${draftId} in ${account} has no usable From header, so Gmail would choose the sender itself. Refused; set the From with update_draft.`);
-    // Rule 4 again, on the draft as it is now: it may have been edited in Gmail since it was created.
-    requireSendAs(t, fromAddress, await deps.gmail.listSendAs(t));
-    const recipients = addressesIn(h.to, h.cc, h.bcc).length;
-    if (recipients === 0) throw new WriteRefusal("no_recipients", `Draft ${draftId} in ${account} has no recipients. Nothing was sent.`);
 
-    await ledger.markSending(account, draftId, now());
     let sent;
     try {
       sent = await deps.gmail.sendDraft(t, draftId);
     } catch (e) {
-      if (e instanceof GmailApiError && e.status >= 400 && e.status < 500) {
-        await ledger.clear(account, draftId);
+      // A 4xx other than 404 means Gmail rejected the request: nothing was sent.
+      if (e instanceof GmailApiError && e.status >= 400 && e.status < 500 && e.status !== 404) {
+        await ledger.release(account, draftId).catch(() => undefined);
         return { ...base, ...empty, status: "failed", recipientCount: recipients, instruction: `Gmail refused to send (HTTP ${e.status}). Nothing was sent; the draft is unchanged. It is safe to fix the draft and call send_draft again. Detail: ${e.message}` };
       }
-      // Ambiguous (server error, malformed answer, network): the draft itself tells us whether Gmail sent it.
+      // Ambiguous (404: the draft vanished between our check and the send; server error; malformed answer; network):
+      // the draft itself tells us whether it can still be sent.
       const stillThere = await draftStillThere(t, draftId);
       if (stillThere === true) {
-        await ledger.clear(account, draftId);
+        await ledger.release(account, draftId).catch(() => undefined);
         return { ...base, ...empty, status: "failed", recipientCount: recipients, instruction: "Gmail did not complete the send and the draft is still in Drafts, so nothing was sent. It is safe to call send_draft again." };
       }
-      return { ...base, ...empty, status: "sent_unconfirmed", recipientCount: recipients, instruction: "Gmail did not confirm the send and the draft is no longer in Drafts, so it was probably sent. Do NOT send it again and do not recreate it. Check Sent with search_threads (query \"in:sent newer_than:1d\")." };
+      return { ...base, ...empty, status: "sent_unconfirmed", recipientCount: recipients, instruction: "Gmail did not confirm the send and the draft is no longer in Drafts: it was probably sent, possibly from another app. Do NOT send it again and do not recreate it. Check Sent with search_threads (query \"in:sent newer_than:1d\")." };
     }
-    // Recorded before confirming: whatever happens next, this draft is never sent twice.
-    await ledger.markSent(account, draftId, { messageId: sent.id, threadId: sent.threadId, sentAt: now() });
+
+    // Recorded before confirming, so this draft is never sent twice. If the record itself fails, the send still
+    // happened: say so, never "nothing was sent".
+    let ledgerNote = "";
+    try {
+      await ledger.markSent(account, draftId, { messageId: sent.id, threadId: sent.threadId, sentAt: now() });
+    } catch (e) {
+      console.error(JSON.stringify({ ledger_error: e instanceof Error ? e.name : typeof e, tool: "send_draft" }));
+      ledgerNote = " The server could not record this send, so its guard against sending this draft twice is weakened: do not send it again.";
+    }
 
     let msg;
     try {
       msg = await deps.gmail.getMessageMetadata(t, sent.id, CONFIRM_HEADERS);
     } catch {
-      return { ...base, ...empty, messageId: sent.id, threadId: sent.threadId, status: "sent_unconfirmed", recipientCount: recipients, instruction: `Gmail accepted the send (message ${sent.id}) but reading it back failed. Do NOT send it again. Call get_message with this id to confirm it is in Sent.` };
+      return { ...base, ...empty, messageId: sent.id, threadId: sent.threadId, status: "sent_unconfirmed", recipientCount: recipients, instruction: `Gmail accepted the send (message ${sent.id}) but reading it back failed. Do NOT send it again. Call get_message with this id to confirm it is in Sent.${ledgerNote}` };
     }
     const labels = msg.labelIds ?? [];
     const mh = renderHeaders(msg.payload);
     if (!labels.includes("SENT")) {
-      return { ...base, ...empty, messageId: msg.id, threadId: msg.threadId, status: "sent_unconfirmed", recipientCount: recipients, instruction: `Gmail accepted the send (message ${msg.id}) but the message does not carry the SENT label yet. Do NOT send it again; check it with get_message.` };
+      return { ...base, ...empty, messageId: msg.id, threadId: msg.threadId, status: "sent_unconfirmed", recipientCount: recipients, instruction: `Gmail accepted the send (message ${msg.id}) but the message does not carry the SENT label yet. Do NOT send it again; check it with get_message.${ledgerNote}` };
     }
-    const sentFrom = extractAddress(mh.from) ?? null;
+    const sentFroms = rawHeaderValues(msg.payload?.headers ?? [], "from");
+    const sentFrom = sentFroms.length === 1 ? (extractAddress(sentFroms[0]) ?? null) : null;
     const fromMatches = sentFrom === fromAddress;
     const iso = msg.internalDate !== undefined && !Number.isNaN(Number(msg.internalDate)) ? new Date(Number(msg.internalDate)).toISOString() : null;
     return {
@@ -513,7 +571,7 @@ export function registerWriteTools(server: McpServer, deps: WriteToolDeps): void
       internalDate: iso,
       fromMatches,
       recipientCount: recipients,
-      instruction: fromMatches ? "Sent and confirmed in Sent." : `WARNING: Gmail sent this from ${sentFrom ?? "an unknown address"} instead of ${fromAddress}. Tell the user; the From was not honoured.`,
+      instruction: (fromMatches ? "Sent and confirmed in Sent." : `WARNING: Gmail sent this from ${sentFrom ?? "an unreadable or multiple address(es)"} instead of ${fromAddress}. Tell the user; the From was not honoured.`) + ledgerNote,
     };
   }
 

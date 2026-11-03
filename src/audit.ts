@@ -75,3 +75,59 @@ export class Audit {
     return rec;
   }
 }
+
+/** Q3: audit rows older than this are deleted by the daily scheduled job. */
+export const AUDIT_RETENTION_DAYS = 90;
+
+/** The durable copy: one row per record in the D1 `audit` table (migrations/0001_audit.sql). Only allowlisted fields exist. */
+export class D1AuditSink implements AuditSink {
+  constructor(private readonly db: D1Database) {}
+
+  async write(r: AuditRecord): Promise<void> {
+    await this.db
+      .prepare(
+        "INSERT INTO audit (ts, tool, outcome, tenant, account, from_address, message_id, thread_id, draft_id, recipient_count, error_code, client_id, principal, duration_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+      )
+      .bind(r.ts, r.tool, r.outcome, r.tenant ?? null, r.account ?? null, r.from ?? null, r.messageId ?? null, r.threadId ?? null, r.draftId ?? null, r.recipientCount ?? null, r.errorCode ?? null, r.clientId ?? null, r.principal ?? null, r.durationMs ?? null)
+      .run();
+  }
+}
+
+/**
+ * Writes every record to the log stream first, then to the durable store. A durable-store failure is reported (by
+ * error name only) and never turns a completed action into an error: the log-stream copy is the fallback.
+ */
+export class CompositeAuditSink implements AuditSink {
+  constructor(
+    private readonly stream: AuditSink,
+    private readonly durable: AuditSink,
+  ) {}
+
+  async write(record: AuditRecord): Promise<void> {
+    await this.stream.write(record);
+    try {
+      await this.durable.write(record);
+    } catch (e) {
+      console.error(JSON.stringify({ audit_sink_error: e instanceof Error ? e.name : typeof e, tool: record.tool }));
+    }
+  }
+}
+
+const audits = new WeakMap<object, Audit>();
+
+/** One Audit per env object: the log stream plus the D1 table when the binding exists (the Worker entry requires it). */
+export function auditFor(env: { readonly AUDIT_DB?: D1Database }): Audit {
+  const hit = audits.get(env);
+  if (hit !== undefined) return hit;
+  const sink = env.AUDIT_DB !== undefined ? new CompositeAuditSink(new ConsoleAuditSink(), new D1AuditSink(env.AUDIT_DB)) : new ConsoleAuditSink();
+  const audit = new Audit(sink);
+  audits.set(env, audit);
+  return audit;
+}
+
+/** Deletes audit rows older than the retention period; returns how many went. Run daily by the scheduled handler. */
+export async function purgeAudit(db: D1Database, nowMs: number, keepDays: number = AUDIT_RETENTION_DAYS): Promise<number> {
+  const cutoff = new Date(nowMs - keepDays * 24 * 3600 * 1000).toISOString();
+  const res = await db.prepare("DELETE FROM audit WHERE ts < ?1").bind(cutoff).run();
+  return res.meta.changes ?? 0;
+}

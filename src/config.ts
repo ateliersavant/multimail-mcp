@@ -4,6 +4,8 @@
  */
 import type { GoogleSignInConfig } from "./auth/google.js";
 import { PrincipalConfigError, parseAllowedPrincipals } from "./auth/principals.js";
+import { parseLimit } from "./guard/ratelimit.js";
+import { DEFAULT_METADATA_HOSTS, DEFAULT_REDIRECT_HOSTS, DEFAULT_REGISTER_PER_HOUR, parseHostList, type ClientPolicy } from "./oauth/client-policy.js";
 import { TenantConfigError, TenantRegistry, loadTenantConfig } from "./tenants/index.js";
 
 /** Bindings and secrets the Worker expects. Secrets are set with `wrangler secret put`, never in wrangler.jsonc. */
@@ -17,6 +19,12 @@ export interface ConfigEnv {
   /** Secret: Google OAuth web client for the sign-in layer (scopes openid email). */
   readonly GOOGLE_CLIENT_ID?: string;
   readonly GOOGLE_CLIENT_SECRET?: string;
+  /** Optional: extra hosts (comma-separated) allowed to serve Client ID Metadata Documents, on top of the defaults. */
+  readonly CLIENT_METADATA_HOSTS?: string;
+  /** Optional: extra https redirect hosts (comma-separated) allowed at client registration, on top of the defaults and loopback. */
+  readonly CLIENT_REDIRECT_HOSTS?: string;
+  /** Optional: client registrations per source address per hour (default 10). */
+  readonly REGISTER_RATE_LIMIT_PER_HOUR?: string;
 }
 
 export interface AppConfig {
@@ -26,6 +34,7 @@ export interface AppConfig {
   readonly registry: TenantRegistry;
   readonly allowedPrincipals: ReadonlySet<string>;
   readonly google: GoogleSignInConfig;
+  readonly clients: ClientPolicy;
 }
 
 export class ConfigError extends Error {
@@ -87,7 +96,12 @@ export function loadConfig(env: ConfigEnv): AppConfig {
   const clientId = nonEmpty(env, "GOOGLE_CLIENT_ID", issues);
   const clientSecret = nonEmpty(env, "GOOGLE_CLIENT_SECRET", issues);
 
-  if (issues.length > 0 || publicUrl === undefined || registry === undefined || allowedPrincipals === undefined || clientId === undefined || clientSecret === undefined) {
+  const metadataHosts = parseHostList(DEFAULT_METADATA_HOSTS, env.CLIENT_METADATA_HOSTS, "CLIENT_METADATA_HOSTS");
+  if (typeof metadataHosts === "string") issues.push(metadataHosts);
+  const redirectHosts = parseHostList(DEFAULT_REDIRECT_HOSTS, env.CLIENT_REDIRECT_HOSTS, "CLIENT_REDIRECT_HOSTS");
+  if (typeof redirectHosts === "string") issues.push(redirectHosts);
+
+  if (issues.length > 0 || typeof metadataHosts === "string" || typeof redirectHosts === "string" || publicUrl === undefined || registry === undefined || allowedPrincipals === undefined || clientId === undefined || clientSecret === undefined) {
     throw new ConfigError(issues);
   }
   const origin = publicUrl.origin;
@@ -97,6 +111,7 @@ export function loadConfig(env: ConfigEnv): AppConfig {
     registry,
     allowedPrincipals,
     google: { clientId, clientSecret, redirectUri: `${origin}/callback` },
+    clients: { metadataHosts, redirectHosts, registerPerHour: parseLimit(env.REGISTER_RATE_LIMIT_PER_HOUR, DEFAULT_REGISTER_PER_HOUR, 1, 1000) },
   };
 }
 

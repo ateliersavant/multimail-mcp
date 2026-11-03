@@ -26,8 +26,11 @@ function typeOf(options: unknown): GetType {
   return "text";
 }
 
-/** The one store instance. Bump the suffix only with a migration plan: it would orphan every client, grant and token. */
-const STORE_NAME = "oauth-v1";
+/**
+ * The one store instance. Changing it orphans every client, grant, token, sent-draft record and rate-limit window at once:
+ * that is the "revoke everything" procedure in docs/runbook.md. Never change it casually.
+ */
+export const STORE_NAME = "oauth-v1";
 
 export function createConsistentKv(namespace: DurableObjectNamespace<OAuthStore>): KVNamespace {
   // A stub is request-scoped I/O in Workers and must not be reused across requests; the namespace binding may be.

@@ -122,21 +122,28 @@ npx wrangler login
 ```
 
 2. OAuth state (clients, grants, tokens, sign-in transactions) lives in a **Durable Object** with SQLite storage, declared in `wrangler.jsonc` and created by the first deploy. Nothing to provision. Do not substitute Workers KV: it is eventually consistent across locations, and a grant written by the browser's callback at one location was not yet readable when the client's server exchanged the code at another (observed 2026-11-03).
-3. The custom hostname lives in a git-ignored `deploy.local.json` next to `package.json`, so no real hostname ever enters the repository:
+3. The audit log lives in a D1 database. Create it once:
+
+```bash
+npx wrangler d1 create multimail-mcp-audit
+```
+
+   Keep the printed `database_id` for the next step. Every deploy applies the migrations in `migrations/` first, and a daily scheduled job (03:17 UTC) deletes rows older than 90 days.
+4. The custom hostname and the audit database id live in a git-ignored `deploy.local.json` next to `package.json`, so no real identifier ever enters the repository:
 
 ```json
-{ "host": "<host>" }
+{ "host": "<host>", "auditDbId": "<database_id from the previous step>" }
 ```
 
    `npm run deploy` runs the full verification (typecheck, tests, egress check, tenant check, mutation suite), merges that file into the committed `wrangler.jsonc`, and deploys with a custom domain route. The zone for `<host>` must be on this Cloudflare account; the first deploy creates the DNS record.
-4. The public origin is a secret for the same reason (it is a real hostname):
+5. The public origin is a secret for the same reason (it is a real hostname):
 
 ```bash
 npx wrangler secret put PUBLIC_URL
 ```
 
    Value: `https://<host>` exactly, no path and no trailing slash.
-5. The tenant file is delivered as a secret so that no real address lives in the repository or the dashboard config:
+6. The tenant file is delivered as a secret so that no real address lives in the repository or the dashboard config:
 
 ```bash
 npx wrangler secret put TENANTS_JSON < tenants.json
@@ -148,8 +155,8 @@ npx wrangler secret put TENANTS_JSON < tenants.json
 
 | Secret | Set in step | Purpose |
 |---|---|---|
-| `PUBLIC_URL` | 5.4 | canonical origin; derives the MCP resource `…/mcp` and the Google redirect `…/callback` |
-| `TENANTS_JSON` | 5.5 | tenant file |
+| `PUBLIC_URL` | 5.5 | canonical origin; derives the MCP resource `…/mcp` and the Google redirect `…/callback` |
+| `TENANTS_JSON` | 5.6 | tenant file |
 | `ALLOWED_PRINCIPALS` | 4.4 | who may authorise clients |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | 4.3 | sign-in layer |
 | `SA_<TENANT>` (one per tenant) | 2.4 | service-account keys (Phase 1 onwards) |
@@ -158,7 +165,7 @@ npx wrangler secret put TENANTS_JSON < tenants.json
 
 - Service-account key: create a new key (step 2.3), `wrangler secret put` it, deploy, then delete the old key in Google Cloud. Order matters; the Worker must never hold a deleted key.
 - Google OAuth client secret: rotate in Credentials, `wrangler secret put GOOGLE_CLIENT_SECRET`, deploy. Existing MCP tokens stay valid; only new sign-ins use the new secret.
-- Revoke all client tokens: wipe the OAuth Durable Object's storage (documented command in `docs/runbook.md`, Phase 3).
+- Revoke all client tokens, emergency stop, per-company cut-off and audit export: see `docs/runbook.md`.
 - Any key used during development is rotated before the first real tenant is connected (handoff Phase 5).
 
 ## 7. GitHub

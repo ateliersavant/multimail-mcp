@@ -6,7 +6,8 @@ import { Audit, type AuditRecord, type AuditSink } from "../../src/audit.js";
 import { loadConfig, type AppConfig } from "../../src/config.js";
 import { GmailClient } from "../../src/gmail/client.js";
 import { DelegationTokenSource } from "../../src/gmail/delegation.js";
-import { MemorySendLedger, SENDING_TTL_SECONDS } from "../../src/gmail/ledger.js";
+import { MemorySendLedger, SENDING_TTL_SECONDS, type SendLedger } from "../../src/gmail/ledger.js";
+import { DEFAULT_LIMITS, MemoryRateLimiter, type Limits } from "../../src/guard/ratelimit.js";
 import { assessSendAs } from "../../src/gmail/sendas.js";
 import { buildMcpServer } from "../../src/mcp/server.js";
 import { GOOGLE_EGRESS, createEgressFetch } from "../../src/net/egress.js";
@@ -40,7 +41,7 @@ interface Harness {
   close(): Promise<void>;
 }
 
-async function harness(opts: { readonly ledger?: boolean; readonly mailboxes?: Record<string, FakeMailboxData> } = {}): Promise<Harness> {
+async function harness(opts: { readonly ledger?: boolean | SendLedger; readonly rateLimiter?: boolean; readonly limits?: Partial<Limits>; readonly mailboxes?: Record<string, FakeMailboxData> } = {}): Promise<Harness> {
   const google = new FakeGoogle(
     [
       { sa: studioSa, mailboxes: [STUDIO_ADA, STUDIO_HELLO] },
@@ -56,7 +57,9 @@ async function harness(opts: { readonly ledger?: boolean; readonly mailboxes?: R
     gmail: new GmailClient({ fetch, tokens }),
     audit: new Audit(sink, () => new Date(clock)),
     now: () => clock,
-    ...(opts.ledger === false ? {} : { ledger: new MemorySendLedger(() => clock) }),
+    ...(opts.ledger === false ? {} : { ledger: typeof opts.ledger === "object" ? opts.ledger : new MemorySendLedger(() => clock) }),
+    ...(opts.rateLimiter === false ? {} : { rateLimiter: new MemoryRateLimiter(() => clock) }),
+    limits: { ...DEFAULT_LIMITS, ...opts.limits },
   });
   const [ct, st] = InMemoryTransport.createLinkedPair();
   await server.connect(st);
@@ -89,7 +92,6 @@ interface Preview {
   bcc: string[];
   subject: string;
   bodyText: string;
-  hasHtml: boolean;
   isReply: boolean;
   approval: string;
 }
@@ -142,7 +144,11 @@ describe("tool surface", () => {
 
   it("refuses an unknown account for every write tool before any Google call", async () => {
     for (const name of WRITE_TOOLS) {
-      const r = await h.call(name, { account: "nobody@example-studio.test", draft_id: "r-1", from: STUDIO_ADA, to: ["bill@vendor.test"], subject: "s", body_text: "b" });
+      const content = { from: STUDIO_ADA, to: ["bill@vendor.test"], subject: "s", body_text: "b" };
+      const args: Record<string, unknown> = { account: "nobody@example-studio.test" };
+      if (name !== "create_draft" && name !== "list_drafts" && name !== "check_send_as") args["draft_id"] = "r-1";
+      if (name === "create_draft" || name === "update_draft") Object.assign(args, content);
+      const r = await h.call(name, args);
       expect(r.isError, name).toBe(true);
       expect(text(r), name).toContain("Unknown account");
     }
@@ -155,7 +161,7 @@ describe("create_draft", () => {
     const r = await draft({ from: STUDIO_ADA_ALIAS, cc: ["c@vendor.test"], bcc: ["b@vendor.test"], subject: "Réunion — jeudi ☕" });
     expect(r.isError, text(r)).toBeFalsy();
     const out = r.structuredContent as unknown as Preview;
-    expect(out).toMatchObject({ tenant: "example-studio", account: STUDIO_ADA, from: STUDIO_ADA_ALIAS, to: ["bill@vendor.test"], cc: ["c@vendor.test"], bcc: ["b@vendor.test"], subject: "Réunion — jeudi ☕", hasHtml: false, isReply: false });
+    expect(out).toMatchObject({ tenant: "example-studio", account: STUDIO_ADA, from: STUDIO_ADA_ALIAS, to: ["bill@vendor.test"], cc: ["c@vendor.test"], bcc: ["b@vendor.test"], subject: "Réunion — jeudi ☕", isReply: false });
     expect(out.approval).toMatch(/nothing has been sent/i);
     expect(out.approval).toMatch(/explicitly approves/);
     const stored = h.google.draft(STUDIO_ADA, out.draftId);
@@ -277,7 +283,7 @@ describe("update_draft, get_draft, list_drafts, delete_draft", () => {
     expect(list.tenant).toBe("example-studio");
     expect(list.drafts.map((d) => [d.draftId, d.subject])).toEqual([[b, "Second"], [a, "First"]]);
     const got = (await h.call("get_draft", { account: STUDIO_ADA, draft_id: a })).structuredContent as { draftId: string; message: { headers: { subject?: string; from?: string }; body: { text: string } } };
-    expect(got).toMatchObject({ draftId: a, message: { headers: { subject: "First", from: '"Ada Lovelace" <ada@example-studio.test>' }, body: { text: "Hello Bill,\nPaid today.\nAda" } } });
+    expect(got).toMatchObject({ draftId: a, message: { headers: { subject: "First", from: "Ada Lovelace <ada@example-studio.test>" }, body: { text: "Hello Bill,\nPaid today.\nAda" } } });
     const del = await h.call("delete_draft", { account: STUDIO_ADA, draft_id: a });
     expect(del.structuredContent).toMatchObject({ draftId: a, deleted: true });
     expect(h.google.draftIds(STUDIO_ADA)).toEqual([b]);
@@ -469,5 +475,110 @@ describe("check_send_as", () => {
     const after = (await h.call("check_send_as", { account: STUDIO_ADA })).structuredContent as { addresses: { address: string; usable: boolean; gmailStatus: string }[]; inGmailButNotAllowed: string[] };
     expect(after.addresses.find((a) => a.address === STUDIO_HELLO)).toMatchObject({ usable: false, gmailStatus: "missing" });
     expect(after.inGmailButNotAllowed).toEqual(["extra@example-studio.test"]);
+  });
+});
+
+describe("rate limits on drafting and sending", () => {
+  it("refuses sends past the hourly limit before Gmail is called; refusals do not use up the quota", async () => {
+    await h.close();
+    h = await harness({ limits: { sendsPerHour: 2 } });
+    const refused = await send("r-999"); // unknown draft: refused before the limit is counted
+    expect(refused.isError).toBe(true);
+    const a = await draftId();
+    const b = await draftId();
+    const c = await draftId();
+    expect(((await send(a)).structuredContent as unknown as SendOut).status).toBe("sent_confirmed");
+    expect(((await send(b)).structuredContent as unknown as SendOut).status).toBe("sent_confirmed");
+    const third = await send(c);
+    expect(third.isError).toBe(true);
+    expect(text(third)).toMatch(/at most 2 emails per hour/);
+    expect(text(third)).toMatch(/Nothing was sent/);
+    expect(h.written.at(-1)).toMatchObject({ tool: "send_draft", outcome: "refused", errorCode: "rate_limited" });
+    expect(sendCalls()).toBe(2);
+    expect(h.google.draftIds(STUDIO_ADA)).toEqual([c]);
+    clock += 3600 * 1000;
+    expect(((await send(c)).structuredContent as unknown as SendOut).status).toBe("sent_confirmed");
+  });
+
+  it("the daily send limit applies across every mailbox and company of the principal", async () => {
+    await h.close();
+    h = await harness({ limits: { sendsPerDay: 1 } });
+    expect(((await send(await draftId())).structuredContent as unknown as SendOut).status).toBe("sent_confirmed");
+    const labs = await h.call("create_draft", { account: LABS_GRACE, from: LABS_GRACE, to: ["r@paper.test"], subject: "s", body_text: "b" });
+    const r = await send((labs.structuredContent as unknown as Preview).draftId, LABS_GRACE);
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/at most 1 emails per day/);
+    expect(h.google.sentLog).toHaveLength(1);
+  });
+
+  it("limits drafts per hour", async () => {
+    await h.close();
+    h = await harness({ limits: { draftsPerHour: 1 } });
+    await draftId();
+    const second = await draft();
+    expect(second.isError).toBe(true);
+    expect(text(second)).toMatch(/at most 1 drafts/);
+    expect(h.written.at(-1)).toMatchObject({ tool: "create_draft", errorCode: "rate_limited" });
+  });
+
+  it("without a rate limiter, sending is refused (fail closed); drafting still works", async () => {
+    await h.close();
+    h = await harness({ rateLimiter: false });
+    const id = await draftId();
+    const r = await send(id);
+    expect(r.isError).toBe(true);
+    expect(text(r)).toMatch(/cannot enforce its sending limits/);
+    expect(sendCalls()).toBe(0);
+    expect(h.written.at(-1)).toMatchObject({ outcome: "error", errorCode: "rate_limiter_unavailable" });
+  });
+});
+
+describe("send_draft after the adversarial review", () => {
+  it("a 404 from the send after Gmail actually sent is reported as possibly sent, never as 'nothing was sent'", async () => {
+    const id = await draftId();
+    h.google.sendFailure = { status: 404, googleStatus: "NOT_FOUND", afterSend: true };
+    const r = await send(id);
+    const out = r.structuredContent as unknown as SendOut;
+    expect(h.google.sentLog).toHaveLength(1);
+    expect(out.status).toBe("sent_unconfirmed");
+    expect(out.instruction).toMatch(/Do NOT send it again/);
+    expect(text(r)).not.toMatch(/Nothing was sent/);
+  });
+
+  it("refuses a draft whose Sender header names someone other than its From", async () => {
+    const id = await draftId();
+    h.google.addDraftHeader(STUDIO_ADA, id, "Sender", "Grace <grace@example-labs.test>");
+    const r = await send(id);
+    expect(r.isError).toBe(true);
+    expect(h.written.at(-1)).toMatchObject({ errorCode: "draft_from_ambiguous" });
+    expect(sendCalls()).toBe(0);
+    // The refusal released the claim: once the header is gone the draft can be sent.
+    expect(h.google.draftIds(STUDIO_ADA)).toContain(id);
+  });
+
+  it("a ledger write that fails after a real send still reports the send, and says not to send again", async () => {
+    await h.close();
+    const inner = new MemorySendLedger(() => clock);
+    const flaky: SendLedger = {
+      lookup: (a, d) => inner.lookup(a, d),
+      claim: (a, d, n) => inner.claim(a, d, n),
+      markSent: async () => {
+        throw new Error("storage timeout");
+      },
+      release: (a, d) => inner.release(a, d),
+    };
+    h = await harness({ ledger: flaky });
+    const id = await draftId();
+    const out = (await send(id)).structuredContent as unknown as SendOut;
+    expect(h.google.sentLog).toHaveLength(1);
+    expect(out.status).toBe("sent_confirmed");
+    expect(out.instruction).toMatch(/do not send it again/);
+  });
+
+  it("two concurrent sends of one draft reach Gmail once", async () => {
+    const id = await draftId();
+    const [a, b] = await Promise.all([send(id), send(id)]);
+    expect(sendCalls()).toBe(1);
+    expect([a, b].filter((r) => r.isError === true)).toHaveLength(1);
   });
 });

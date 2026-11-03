@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Phase 3 hardening. Durable 90-day audit log in D1 with a daily retention job and `npm run audit:export`; atomic rate limits (per client token, per principal for drafts and sends, per source address for registrations); runbook; review pack for the independent reviewer.
+- Adversarial review: nine confirmed findings, each proven by a failing test and fixed; the tests now run with the suite (`test/adversarial/`). Sender and recipient headers parsed per RFC 5322 so a display name never hides the real address; drafts are plain text only and `get_draft` shows any HTML part; an atomic claim per draft so concurrent sends reach Gmail once; the From is read untruncated at send time (one From header, one mailbox, matching Sender); a 404 at send is ambiguous; a failed ledger write is reported with the send; HTML stripping in linear time; client metadata documents only from supported hosts; sign-in requires the company's own Workspace (`hd`); configuration errors carry no tenant-file content.
+- Registration accepts only redirects to supported clients or loopback, and no client key URLs. Egress narrowed from path prefixes to the exact method and path of each Google call (the `gmail.modify` scope's direct send, trash and label changes are unreachable). The unused token-revocation endpoint left the allowlist.
+
 - Phase 0 scaffold: Cloudflare Worker with an OAuth 2.1 layer (`@cloudflare/workers-oauth-provider` 1.2.4: Protected Resource Metadata, Client ID Metadata Documents, Dynamic Client Registration fallback, PKCE, RFC 9207 `iss`, revocation), Sign in with Google restricted to an allowlist, strict fail-closed tenant file, single egress allowlist with redirects refused, content-free audit records, and an MCP v2 server (`@modelcontextprotocol/server` 2.4.0) exposing `list_accounts`.
 - OAuth state in a Durable Object with SQLite storage (KV's cross-location lag refused a freshly issued code).
 - Consent page `form-action` allows the Google hand-off and the client's origin; egress wrapper uses `redirect: "manual"` and refuses 3xx (the Workers runtime rejects `"error"`).

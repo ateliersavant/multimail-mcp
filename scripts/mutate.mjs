@@ -144,8 +144,8 @@ const MUTATIONS = [
     // Phase 2, rule 5: a draft already sent is refused, never sent or recreated.
     id: "sent-ledger",
     file: "src/mcp/tools/write.ts",
-    find: "    const prior = await ledger.lookup(account, draftId);",
-    replace: "    const prior = null;",
+    find: "    const claim = await ledger.claim(account, draftId, now());",
+    replace: "    const claim = { claimed: true };",
     projects: ["unit"],
   },
   {
@@ -173,10 +173,58 @@ const MUTATIONS = [
     projects: ["unit"],
   },
   {
+    // Phase 3: the audit log must reach the durable D1 table, not only the short-lived log stream.
+    id: "audit-durable-sink",
+    file: "src/audit.ts",
+    find: "  const sink = env.AUDIT_DB !== undefined ? new CompositeAuditSink(new ConsoleAuditSink(), new D1AuditSink(env.AUDIT_DB)) : new ConsoleAuditSink();",
+    replace: "  const sink = new ConsoleAuditSink();",
+    projects: ["worker"],
+  },
+  {
+    // Phase 3: 90-day retention must actually delete old rows.
+    id: "audit-retention",
+    file: "src/audit.ts",
+    find: 'const res = await db.prepare("DELETE FROM audit WHERE ts < ?1").bind(cutoff).run();',
+    replace: 'const res = await db.prepare("DELETE FROM audit WHERE 0 AND ts < ?1").bind(cutoff).run();',
+    projects: ["worker"],
+  },
+  {
+    // Phase 3: no audit database, no service.
+    id: "bindings-fail-closed",
+    file: "src/bindings.ts",
+    find: "  if (env.AUDIT_DB === undefined) issues.push(",
+    replace: "  if (false) issues.push(",
+    projects: ["unit"],
+  },
+  {
+    // Phase 3: per-client request limit on /mcp.
+    id: "mcp-rate-limit",
+    file: "src/mcp/handler.ts",
+    find: "  if (!rate.allowed) {",
+    replace: "  if (false) {",
+    projects: ["worker"],
+  },
+  {
+    // Phase 3: per-principal sending limits.
+    id: "send-rate-limit",
+    file: "src/mcp/tools/write.ts",
+    find: "    await limitSends();",
+    replace: "    void limitSends;",
+    projects: ["unit"],
+  },
+  {
+    // Phase 3: the window arithmetic itself.
+    id: "ratelimit-window",
+    file: "src/guard/ratelimit.ts",
+    find: "  if (count >= limit) return {",
+    replace: "  if (false) return {",
+    projects: ["unit", "worker"],
+  },
+  {
     id: "egress-allowlist",
     file: "src/net/egress.ts",
-    find: 'if (prefixes === undefined) throw new EgressDeniedError("host not allowlisted", url);',
-    replace: "if (prefixes === undefined) return;",
+    find: 'if (rules === undefined) throw new EgressDeniedError("host not allowlisted", url);',
+    replace: "if (rules === undefined) return;",
     projects: ["unit"],
   },
   {
@@ -184,6 +232,154 @@ const MUTATIONS = [
     file: "src/auth/google.ts",
     find: 'if (!ok) throw new SignInError("id_token_bad_signature");',
     replace: "void ok;",
+    projects: ["unit"],
+  },
+  // Phase 3, adversarial review fixes.
+  {
+    // Concurrent send_draft calls for one draft: exactly one claim may succeed.
+    id: "send-claim-atomic",
+    file: "src/store/oauth-store.ts",
+    find: "if (row !== undefined && (row.expiration === null || row.expiration > this.nowSeconds())) return row.value;",
+    replace: "void row;",
+    projects: ["worker"],
+  },
+  {
+    // Giving up a claim must never erase the record of a send that happened.
+    id: "ledger-release-keeps-sent-durable",
+    file: "src/store/oauth-store.ts",
+    find: 'if (state === "sending") this.ctx.storage.sql.exec("DELETE FROM kv WHERE key = ?", key);',
+    replace: 'this.ctx.storage.sql.exec("DELETE FROM kv WHERE key = ?", key);',
+    projects: ["worker"],
+  },
+  {
+    id: "ledger-release-keeps-sent-memory",
+    file: "src/gmail/ledger.ts",
+    find: 'if (parse(this.live(k))?.state === "sending") this.entries.delete(k);',
+    replace: "this.entries.delete(k);",
+    projects: ["unit"],
+  },
+  {
+    // A draft must carry exactly one From header at send time.
+    id: "send-single-from-header",
+    file: "src/mcp/tools/write.ts",
+    find: "const single = froms.length === 1 ? extractAddress(froms[0]) : undefined;",
+    replace: "const single = extractAddress(froms[0]);",
+    projects: ["unit"],
+  },
+  {
+    // A From naming several mailboxes, or an unreadable one, is refused (not reduced to one address).
+    id: "send-single-mailbox",
+    file: "src/gmail/address.ts",
+    find: "if (p.mailboxes.length !== 1 || p.unparsed.length > 0) return undefined;",
+    replace: "if (p.mailboxes.length === 0) return undefined;",
+    projects: ["unit"],
+  },
+  {
+    id: "send-sender-matches-from",
+    file: "src/mcp/tools/write.ts",
+    find: "if (senders.some((s) => extractAddress(s) !== single)) {",
+    replace: "if (false) {",
+    projects: ["unit"],
+  },
+  {
+    // A 404 from the send is ambiguous (the draft may have been sent), never "nothing was sent".
+    id: "send-404-ambiguous",
+    file: "src/mcp/tools/write.ts",
+    find: "e.status >= 400 && e.status < 500 && e.status !== 404) {",
+    replace: "e.status >= 400 && e.status < 500) {",
+    projects: ["unit"],
+  },
+  {
+    // A failed ledger write after a real send is reported with the send, never as an error.
+    id: "send-ledger-failure-reported",
+    file: "src/mcp/tools/write.ts",
+    find: '      ledgerNote = " The server could not record this send',
+    replace: '      throw e;\n      ledgerNote = " The server could not record this send',
+    projects: ["unit"],
+  },
+  {
+    // The model cannot add an HTML body the user never sees.
+    id: "no-model-html",
+    file: "src/mcp/tools/write.ts",
+    find: "inputSchema: z.object({ account: Account, ...Content }).strict(),",
+    replace: "inputSchema: z.object({ account: Account, ...Content }),",
+    projects: ["unit"],
+  },
+  {
+    // get_draft shows an HTML part a draft gained elsewhere.
+    id: "draft-html-shown",
+    file: "src/mcp/tools/write.ts",
+    find: "htmlText: html?.text ?? null,",
+    replace: "htmlText: null,",
+    projects: ["unit"],
+  },
+  {
+    // Display: the real address is shown however long the display name is.
+    id: "display-real-address",
+    file: "src/gmail/address.ts",
+    find: "const name = m.name.length > MAX_NAME_CHARS ? `${m.name.slice(0, MAX_NAME_CHARS)}…` : m.name;",
+    replace: "const name = m.name; if (name.length > MAX_NAME_CHARS) return name.slice(0, 2000);",
+    projects: ["unit"],
+  },
+  {
+    // A metadata-document client id on another host never reaches the OAuth library (which would fetch it).
+    id: "client-metadata-host-screen",
+    file: "src/index.ts",
+    find: 'if (result === "client_host_not_allowed") {',
+    replace: "if (false) {",
+    projects: ["worker"],
+  },
+  {
+    id: "client-metadata-host-check",
+    file: "src/oauth/client-policy.ts",
+    find: 'return u.port === "" && u.username === "" && u.password === "" && metadataHosts.has(u.hostname.toLowerCase());',
+    replace: "return true;",
+    projects: ["unit"],
+  },
+  {
+    // Registration only for supported clients' redirect hosts and loopback.
+    id: "registration-redirect-policy",
+    file: "src/oauth/client-policy.ts",
+    find: 'if (!Array.isArray(uris) || uris.length === 0 || !uris.every((u) => typeof u === "string" && redirectUriAllowed(u, redirectHosts))) {',
+    replace: "if (false) {",
+    projects: ["unit", "worker"],
+  },
+  {
+    id: "register-rate-limit",
+    file: "src/index.ts",
+    find: "    if (!rate.allowed) {",
+    replace: "    if (false) {",
+    projects: ["worker"],
+  },
+  {
+    // Sign-in: the account must be managed by the company's own Google Workspace.
+    id: "workspace-domain",
+    file: "src/oauth/handlers.ts",
+    find: "if (!workspaceDomainMatches(principal.email, principal.hd, cfg.registry.tenants)) {",
+    replace: "if (false) {",
+    projects: ["worker"],
+  },
+  {
+    // Egress: the method is part of every rule (gmail.modify could otherwise send or trash directly).
+    id: "egress-method",
+    file: "src/net/egress.ts",
+    find: "if (!rules.some((r) => r.method === m && pathMatches(r.path, url.pathname)))",
+    replace: "if (!rules.some((r) => pathMatches(r.path, url.pathname)))",
+    projects: ["unit"],
+  },
+  {
+    id: "egress-exact-path",
+    file: "src/net/egress.ts",
+    find: "if (want.length !== got.length) return false;",
+    replace: "if (got.length < want.length) return false;",
+    projects: ["unit"],
+  },
+  {
+    // Configuration errors name variables, never values from the tenant file.
+    id: "config-error-no-values",
+    file: "src/tenants/validate.ts",
+    find: 'throw new TenantConfigError(["$: not valid JSON (run npm run check:tenants on the file to see where)"]);',
+    replace: "throw new TenantConfigError([`$: not valid JSON (${jsonText.slice(0, 40)})`]);",
     projects: ["unit"],
   },
 ];

@@ -21,7 +21,8 @@ Hosted assistants hold one Google account per connector. If you run more than on
 ## What it refuses to do
 
 - Read one company and write another in a single call. Cross-tenant forwarding is refused, not confirmed.
-- Send directly. Permanently delete. Change settings or filters. Upload or download attachments (v1).
+- Send directly. Delete mail: only a draft can be deleted, with `delete_draft`. Change settings or filters. Upload or download attachments (v1).
+- Write HTML. Drafts are plain text, so what you approve is exactly what recipients read.
 - Log content. Audit records hold metadata only: no subjects, bodies, attachment names or recipient addresses.
 - Return an empty result when something is misconfigured. Missing config, secrets or tokens fail loudly.
 

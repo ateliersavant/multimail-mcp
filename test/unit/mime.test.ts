@@ -44,13 +44,12 @@ describe("buildMime", () => {
     expect(encodeWords("plain ascii")).toBe("plain ascii");
   });
 
-  it("adds an HTML alternative when given, keeping the plain text first", () => {
-    const mime = buildMime({ ...base, html: "<p>Paid.</p>", boundary: "B1" });
-    expect(mime).toContain('Content-Type: multipart/alternative; boundary="B1"');
-    expect(mime.indexOf("text/plain")).toBeLessThan(mime.indexOf("text/html"));
+  it("builds one plain-text part and never an HTML alternative", () => {
+    const mime = buildMime(base);
+    expect(mime).not.toMatch(/text\/html|multipart/i);
     const p = parseRaw(toGmailRaw(mime));
     expect(p.text).toBe(base.text);
-    expect(p.html).toBe("<p>Paid.</p>");
+    expect(p.html).toBeUndefined();
   });
 
   it("refuses header injection in the subject and threading headers, and builds nothing", () => {
@@ -76,7 +75,6 @@ describe("buildMime", () => {
   it("bounds subject and bodies", () => {
     expect(codeOf(() => buildMime({ ...base, subject: "s".repeat(501) }))).toBe("subject_too_long");
     expect(codeOf(() => buildMime({ ...base, text: "x".repeat(100_001) }))).toBe("body_too_large");
-    expect(codeOf(() => buildMime({ ...base, html: "x".repeat(200_001) }))).toBe("body_too_large");
   });
 
   it("writes reply headers only when they are clean message-id lists", () => {

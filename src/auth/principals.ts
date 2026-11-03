@@ -24,3 +24,16 @@ export function parseAllowedPrincipals(raw: string | undefined): ReadonlySet<str
 export function isAllowedPrincipal(allowed: ReadonlySet<string>, email: string): boolean {
   return allowed.has(email);
 }
+
+/**
+ * The id_token's `hd` (the Google Workspace that manages the account) must be present and be the address's own domain,
+ * or another domain of the same company. Without it, a consumer Google account registered on a company address, or an
+ * account managed by some other Workspace, would pass the email allowlist.
+ */
+export function workspaceDomainMatches(email: string, hd: string | undefined, tenants: readonly { readonly domains: readonly string[] }[]): boolean {
+  if (hd === undefined) return false;
+  const managed = hd.toLowerCase();
+  const domain = email.slice(email.lastIndexOf("@") + 1).toLowerCase();
+  if (managed === domain) return true;
+  return tenants.some((t) => t.domains.includes(domain) && t.domains.includes(managed));
+}
