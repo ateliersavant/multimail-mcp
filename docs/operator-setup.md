@@ -169,6 +169,6 @@ npx wrangler secret put TENANTS_JSON < tenants.json
 gh repo create <owner>/multimail-mcp --private --source . --remote origin --push
 ```
 
-2. Settings → Code security: enable **Private vulnerability reporting** (SECURITY.md points reporters there) and **Secret scanning** with push protection.
-3. Settings → Branches: protect `main` (require the `ci` workflow, no force pushes).
+2. Settings → Code security. On a **GitHub Free** account with a **private** repository (the situation on 3 Nov 2026), GitHub offers only Dependabot alerts and Dependabot security updates; both are enabled. Private vulnerability reporting, secret scanning with push protection, and branch protection all need GitHub Pro or a public repository. Until then: the `ci` workflow runs a full-history gitleaks scan on every push (that is the secret scan), and nobody but the owner has push access (that is the branch protection). Revisit this step at release time or on a plan change.
+3. Once available: enable private vulnerability reporting and secret scanning with push protection, and protect `main` (require the `verify` and `secrets` checks, no force pushes, no deletions, linear history).
 4. Before the repository is ever made public: `gitleaks git .` over the full history, and a last read of the tree for anything that names a real tenant.

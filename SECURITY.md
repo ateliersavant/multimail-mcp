@@ -2,7 +2,7 @@
 
 ## Reporting
 
-Use GitHub's **private vulnerability reporting** on this repository (Security tab → Report a vulnerability) with a description and reproduction. Please do not open a public issue for a vulnerability. We acknowledge within three working days.
+While this repository is private, report to its owner directly (a private issue reaches only collaborators). Once it is public, use GitHub's **private vulnerability reporting** (Security tab → Report a vulnerability), which GitHub offers for public repositories. Either way, include a description and reproduction and do not open a public issue for a vulnerability. We acknowledge within three working days.
 
 ## Threat model (summary)
 
