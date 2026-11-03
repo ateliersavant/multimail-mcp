@@ -35,6 +35,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # Full-history scan with a pinned, checksum-verified gitleaks binary. (gitleaks-action derives its commit range
+      # from the push event and fails on a branch's first push, where the range starts before the root commit.)
+      - name: gitleaks over the full history
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.24.3
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          curl -sSfL -o gitleaks.tar.gz "${base}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o checksums.txt "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz$" checksums.txt | sed 's# gitleaks_# gitleaks.tar.gz #; s#gitleaks.tar.gz .*#gitleaks.tar.gz#' | sha256sum --check --strict
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 2 .
