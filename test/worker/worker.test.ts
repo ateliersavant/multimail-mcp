@@ -119,13 +119,43 @@ describe("MCP over HTTP with a real token", () => {
     await client.connect(transport);
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name);
-    expect(names).toEqual(["list_accounts"]);
-    expect(tools.tools[0]?.description).toContain("untrusted data");
+    expect(names).toEqual(["list_accounts", "search_threads", "get_thread", "get_message", "list_labels"]);
+    for (const t of tools.tools) expect(t.description, t.name).toContain("untrusted data");
     const result = await client.callTool({ name: "list_accounts", arguments: {} });
     const out = result.structuredContent as { principal: string; tenants: { id: string; mailboxes: { address: string }[] }[] };
     expect(out.principal).toBe("ada@example-studio.test");
     expect(out.tenants.map((t) => t.id)).toEqual(["example-studio", "example-labs"]);
     expect(JSON.stringify(result)).not.toContain("SA_EXAMPLE");
+    await client.close();
+  });
+
+  it("read tools over HTTP in workerd: unknown account refused; missing or malformed service-account secret is a loud error, never an empty result", async () => {
+    const { token } = await tokenFor("ada@example-studio.test");
+    const transport = new StreamableHTTPClientTransport(new URL(`${ORIGIN}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${token}` } },
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => worker.fetch(input, init),
+    });
+    const client = new Client({ name: "worker-test", version: "0.0.0" });
+    await client.connect(transport);
+    const text = (r: Awaited<ReturnType<Client["callTool"]>>): string => (r.content as { type: string; text?: string }[]).map((c) => c.text ?? "").join("\n");
+
+    const unknown = await client.callTool({ name: "list_labels", arguments: { account: "nobody@example-studio.test" } });
+    expect(unknown.isError).toBe(true);
+    expect(text(unknown)).toContain("Unknown account");
+
+    // SA_EXAMPLE_STUDIO is not bound in the test runtime: the tenant exists, its key does not.
+    const missing = await client.callTool({ name: "search_threads", arguments: { account: "ada@example-studio.test", query: "anything" } });
+    expect(missing.isError).toBe(true);
+    expect(text(missing)).toContain("example-studio");
+    expect(text(missing)).toContain("operator configuration error");
+    expect(text(missing)).not.toContain("SA_EXAMPLE_STUDIO");
+    expect(missing.structuredContent).toBeUndefined();
+
+    // SA_EXAMPLE_LABS is bound to a string that is not a key.
+    const malformed = await client.callTool({ name: "get_thread", arguments: { account: "grace@example-labs.test", thread_id: "abc" } });
+    expect(malformed.isError).toBe(true);
+    expect(text(malformed)).toContain("malformed");
+    expect(text(malformed)).toContain("example-labs");
     await client.close();
   });
 

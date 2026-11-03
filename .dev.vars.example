@@ -5,3 +5,5 @@ GOOGLE_CLIENT_ID=...apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=...
 # Paste the contents of a tenant file on one line, or use fixtures/tenants.example.json for a dry run.
 TENANTS_JSON={"tenants":[]}
+# One service-account key per tenant, under the NAME the tenant file gives (the whole JSON key file on one line).
+# SA_EXAMPLE_STUDIO={"type":"service_account",...}

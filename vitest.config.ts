@@ -23,6 +23,8 @@ export default defineConfig({
                 GOOGLE_CLIENT_ID: "test-client-id.apps.googleusercontent.com",
                 GOOGLE_CLIENT_SECRET: "test-client-secret",
                 TENANTS_JSON: fixtureTenants,
+                // SA_EXAMPLE_STUDIO is deliberately absent (missing secret path); the labs one is present but not a key.
+                SA_EXAMPLE_LABS: "not-a-service-account-key",
               },
             },
           }),

@@ -2,7 +2,7 @@
 
 Every claim is graded. **verified** = exercised end-to-end against a real client or API in CI or by hand, with the date. **limited** = works with a stated caveat. **source-only** = implemented and unit-tested, not yet exercised against the real system. **design-only** = specified, no code.
 
-Last updated: 2026-11-03 (Phase 0 accepted: deployed on workers.dev, first real client connected).
+Last updated: 2026-11-03 (Phase 1 read tools in source and deployed; exercised against a fake Gmail only, the throwaway test tenant does not exist yet).
 
 | Capability | Grade | Notes |
 |---|---|---|
@@ -10,14 +10,14 @@ Last updated: 2026-11-03 (Phase 0 accepted: deployed on workers.dev, first real 
 | Google sign-in restricted to `ALLOWED_PRINCIPALS` | limited | The allowed-principal path is **verified live** (2026-11-03). The refusal of a non-allowlisted account is tested with a fake Google and in the Workers runtime, not yet with a real second Google account |
 | Tenant file validated at boot, fail closed | source-only | Phase 0: strict validator (unknown keys, domains owned once, send-as inside tenant, lowercase only); a bad file makes every request 503 |
 | `list_accounts` | **verified** 2026-11-03 | Returned the fixture tenants to Claude (web) and to a Claude Code session using the same connector |
-| Delegation token minting (one service account per tenant) | design-only | Phase 1 |
-| `search_threads`, `get_thread`, `get_message`, `list_labels` | design-only | Phase 1 |
+| Delegation token minting (one service account per tenant) | source-only | Phase 1: RS256 assertion signed with the tenant's key (read from the Cloudflare secret the tenant file names, imported non-extractable), exchanged at Google's token endpoint through the egress wrapper, cached per mailbox in memory. Tested against a fake Google in Node and in workerd; not yet against a Workspace tenant |
+| `search_threads`, `get_thread`, `get_message`, `list_labels` | source-only | Phase 1: every tool takes `account`, echoes `tenant` and `account`, refuses unknown accounts, bounds pages (25) and bodies (20k chars per message, 80k per thread, cuts flagged), strips HTML, lists attachments by metadata only, and turns every Gmail or credential failure into a loud error. Tested over MCP against a fake Gmail; not yet against a Workspace tenant |
 | Drafts: create / update / get / list / delete | design-only | Phase 2 |
 | Send-as verification (Gmail list + allowlist) | design-only | Phase 2 |
 | `send_draft` with three-state confirmation | design-only | Phase 2 |
 | Labels, archive, trash / untrash | design-only | Phase 2 |
-| Content-free audit log | design-only | Phase 3 |
-| Rate limits, bounded pages, egress gate | design-only | Phase 3 |
+| Content-free audit log | limited | Phase 1 writes one metadata-only record per tool call (tool, outcome, tenant, account, ids, error code, principal, client, duration) to the Worker log stream. The KV/D1 sink with 90-day retention and `wrangler` export is Phase 3 |
+| Rate limits, bounded pages, egress gate | limited | Bounded page and body sizes and the egress gate (code + CI grep) are in. Per-token rate limits are Phase 3 |
 | Claude web connector | **verified** 2026-11-03 | Custom connector added by URL, CIMD registration, Google sign-in, tools listed and called |
 | Claude desktop / iPhone | design-only | Same connector; not yet opened on those apps |
 | Claude Code | limited | Reached through the claude.ai connector (2026-11-03); the direct `claude mcp add` path with a loopback redirect not yet exercised |
@@ -26,7 +26,7 @@ Last updated: 2026-11-03 (Phase 0 accepted: deployed on workers.dev, first real 
 
 ## Enforcement pinned by mutation tests
 
-Account allowlist · principal allowlist at authorisation · principal allowlist on every MCP call · https-only public origin · tenant unknown-key rejection · send-as domain guard · consent-page form-action · egress redirect mode (Workers runtime) · egress redirect refusal · expired store rows · egress host allowlist · id_token signature. Each guard is removed in turn by `npm run test:mutation`; the suite must fail every time.
+Account allowlist (registry) · account allowlist at the tool layer · principal allowlist at authorisation · principal allowlist on every MCP call · https-only public origin · tenant unknown-key rejection · send-as domain guard · consent-page form-action · egress redirect mode (Workers runtime) · egress redirect refusal · expired store rows · egress host allowlist · id_token signature · HTML stripping · Gmail errors never read as empty. Each guard is removed in turn by `npm run test:mutation`; the suite must fail every time.
 
 ## Does not
 

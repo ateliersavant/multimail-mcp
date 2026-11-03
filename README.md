@@ -2,7 +2,7 @@
 
 A self-hosted remote [MCP](https://modelcontextprotocol.io) server that gives Claude (web, desktop, mobile, Claude Code), ChatGPT and Codex read, draft and send access to **several Google Workspace mailboxes across several separate companies**, from one connector, with hard walls between the companies.
 
-**Status: Phase 0 (scaffold). Nothing here has touched a real mailbox yet.** See [CAPABILITIES.md](CAPABILITIES.md) for what is verified versus designed.
+**Status: Phase 1 (read tools) in source, exercised against a fake Gmail only. Nothing here has touched a real mailbox yet.** See [CAPABILITIES.md](CAPABILITIES.md) for what is verified versus designed.
 
 ## Why it exists
 

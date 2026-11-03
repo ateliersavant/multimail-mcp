@@ -20,8 +20,8 @@ Use GitHub's **private vulnerability reporting** on this repository (Security ta
 
 ## Enforcement is tested
 
-A mutation suite disables each guard in turn (account allowlist, send-as check, cross-tenant guard, send verification, three-state outcome). Each mutation must make the test suite fail. A green suite with a guard removed is itself a failing build.
+A mutation suite disables each guard in turn (account allowlist in the registry and at the tool layer, HTML stripping, Gmail errors read as empty, the egress and principal gates; from Phase 2 the send-as check, cross-tenant guard, send verification and three-state outcome). Each mutation must make the test suite fail. A green suite with a guard removed is itself a failing build.
 
 ## Status
 
-Phase 0. No real tenant is connected until an independent security review signs off.
+Phase 1 (read tools) in source, tested against a fake Gmail. No real tenant is connected until an independent security review signs off.

@@ -85,6 +85,30 @@ const MUTATIONS = [
     projects: ["worker"],
   },
   {
+    // Phase 1: the tool layer must refuse an unknown account itself, not fall back to any configured mailbox.
+    id: "tool-account-allowlist",
+    file: "src/mcp/tools/read.ts",
+    find: "target = deps.registry.requireMailbox(account);",
+    replace: "target = deps.registry.getMailbox(account) ?? (deps.registry.getMailbox(deps.registry.tenants[0].mailboxes[0].address));",
+    projects: ["unit", "worker"],
+  },
+  {
+    // Phase 1: HTML bodies must be stripped before they reach the model (threat T4).
+    id: "html-stripping",
+    file: "src/gmail/render.ts",
+    find: "    text = stripHtml(html);",
+    replace: "    text = normaliseWhitespace(html);",
+    projects: ["unit"],
+  },
+  {
+    // Phase 1: a Gmail error must never read as an empty mailbox (rule 6).
+    id: "gmail-error-not-empty",
+    file: "src/gmail/client.ts",
+    find: "    if (!res.ok) {\n      const code = statusToCode(res.status);",
+    replace: "    if (!res.ok) return {};\n    if (false) {\n      const code = statusToCode(res.status);",
+    projects: ["unit"],
+  },
+  {
     id: "egress-allowlist",
     file: "src/net/egress.ts",
     find: 'if (prefixes === undefined) throw new EgressDeniedError("host not allowlisted", url);',
