@@ -25,14 +25,24 @@ gcloud auth login
 ```
 
 ```bash
-gcloud organizations list --format='table(displayName,name,createTime)'
+gcloud organizations list --format='table(displayName,name,creationTime)'
+```
+
+   Then read the effective policy on the new project. Set the variable to your project id first (shown on the project dashboard). These use the v1 Resource Manager API on purpose: it works without enabling the Org Policy API on whatever project gcloud happens to bill by default.
+
+```bash
+PROJECT=your-project-id
 ```
 
 ```bash
-gcloud org-policies describe constraints/iam.managed.disableServiceAccountKeyCreation --project=<PROJECT_ID> --effective
+gcloud resource-manager org-policies describe iam.managed.disableServiceAccountKeyCreation --project="$PROJECT" --effective
 ```
 
-   If it reports `enforce: true`, an Organization Policy Administrator applies a project-level exception:
+```bash
+gcloud resource-manager org-policies describe iam.disableServiceAccountKeyCreation --project="$PROJECT" --effective
+```
+
+   `booleanPolicy: {}` means **not enforced**: keys can be created and nothing more is needed. `enforced: true` means key creation is blocked, and an Organization Policy Administrator applies a project-level exception:
 
 ```yaml
 # policy.yaml
@@ -43,7 +53,7 @@ spec:
 ```
 
 ```bash
-gcloud org-policies set-policy policy.yaml
+gcloud org-policies set-policy policy.yaml --billing-project="$PROJECT"
 ```
 
    Record the exception here with the date. Revisit it when Workload Identity Federation for domain-wide delegation becomes practical from Workers.
@@ -111,17 +121,11 @@ npx wrangler secret put ALLOWED_PRINCIPALS
 npx wrangler login
 ```
 
-2. A KV namespace for OAuth state (clients, grants, tokens). Give it a project-specific title; the binding inside the Worker is always `OAUTH_KV`, but **never share a namespace with another OAuth server on the same account** (each namespace holds that server's tokens and grants):
-
-```bash
-npx wrangler kv namespace create multimail-mcp-oauth
-```
-
-   Keep the returned id for `deploy.local.json` (step 3).
-3. Custom hostname and KV id live in a git-ignored `deploy.local.json` next to `package.json`, so no real hostname ever enters the repository:
+2. OAuth state (clients, grants, tokens, sign-in transactions) lives in a **Durable Object** with SQLite storage, declared in `wrangler.jsonc` and created by the first deploy. Nothing to provision. Do not substitute Workers KV: it is eventually consistent across locations, and a grant written by the browser's callback at one location was not yet readable when the client's server exchanged the code at another (observed 2026-11-03).
+3. The custom hostname lives in a git-ignored `deploy.local.json` next to `package.json`, so no real hostname ever enters the repository:
 
 ```json
-{ "host": "<host>", "kvId": "<id printed by the kv namespace create command>" }
+{ "host": "<host>" }
 ```
 
    `npm run deploy` runs the full verification (typecheck, tests, egress check, tenant check, mutation suite), merges that file into the committed `wrangler.jsonc`, and deploys with a custom domain route. The zone for `<host>` must be on this Cloudflare account; the first deploy creates the DNS record.
@@ -154,7 +158,7 @@ npx wrangler secret put TENANTS_JSON < tenants.json
 
 - Service-account key: create a new key (step 2.3), `wrangler secret put` it, deploy, then delete the old key in Google Cloud. Order matters; the Worker must never hold a deleted key.
 - Google OAuth client secret: rotate in Credentials, `wrangler secret put GOOGLE_CLIENT_SECRET`, deploy. Existing MCP tokens stay valid; only new sign-ins use the new secret.
-- Revoke all client tokens: clear the OAuth KV namespace (documented command in `docs/runbook.md`, Phase 3).
+- Revoke all client tokens: wipe the OAuth Durable Object's storage (documented command in `docs/runbook.md`, Phase 3).
 - Any key used during development is rotated before the first real tenant is connected (handoff Phase 5).
 
 ## 7. GitHub

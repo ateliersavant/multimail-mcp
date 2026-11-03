@@ -115,6 +115,17 @@ describe("GET /authorize (consent page)", () => {
     expect(html).toContain("client.example.test");
     expect(res.headers.get("set-cookie")).toContain("__Host-consent=abc");
     expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
+    // form-action covers the redirects after the POST: Google on approve, the client on deny. Nothing else.
+    expect(res.headers.get("content-security-policy")).toContain("form-action 'self' https://accounts.google.com https://client.example.test;");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+  });
+
+  it("allows a loopback client (Claude Code) on its exact port, and never anything that is not a bare origin", async () => {
+    const loop = fakes({ describeConsent: async () => ({ ...consentDescription, redirectUri: "http://127.0.0.1:33418/callback", redirectHost: "127.0.0.1", redirectIsLoopback: true }) });
+    const res = await harness(loop).handler.fetch(new Request("https://mcp.example.test/authorize?client_id=client-1"), env(loop.helpers));
+    expect(res.headers.get("content-security-policy")).toContain("form-action 'self' https://accounts.google.com http://127.0.0.1:33418;");
+    const { cspFor } = await import("../../src/oauth/html.js");
+    expect(cspFor(["https://ok.example.test", "https://x.example.test; script-src *", "javascript:alert(1)"])).toContain("form-action 'self' https://ok.example.test;");
   });
 
   it("returns 400 for an unknown client and follows AuthorizationError redirects", async () => {

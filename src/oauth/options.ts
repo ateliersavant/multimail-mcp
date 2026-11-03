@@ -29,8 +29,9 @@ export function buildProviderOptions<Env>(cfg: AppConfig, handlers: ProviderHand
     refreshTokenTTL: 30 * 24 * 60 * 60, // 30 d hard cap
     refreshTokenIdleTTL: 7 * 24 * 60 * 60, // 7 d without use
     clientRegistrationTTL: 90 * 24 * 60 * 60,
-    onError: ({ code, status }) => {
-      console.warn(JSON.stringify({ oauth_error: code, status })); // content-free
+    onError: ({ code, status, description, internal }) => {
+      // Library constants only (code, status, its fixed description and internal reason); never request content.
+      console.warn(JSON.stringify({ oauth_error: code, status, description, category: internal.category, reason: internal.reason }));
     },
   };
 }

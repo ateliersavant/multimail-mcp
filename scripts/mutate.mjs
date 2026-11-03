@@ -53,6 +53,38 @@ const MUTATIONS = [
     projects: ["unit"],
   },
   {
+    // Without Google in form-action, browsers block the redirect after "Continue with Google".
+    id: "consent-form-action",
+    file: "src/oauth/handlers.ts",
+    find: "const formActions = [GOOGLE_SIGN_IN_ORIGIN, ...(clientOrigin !== undefined ? [clientOrigin] : [])];",
+    replace: "const formActions: string[] = [];",
+    projects: ["worker"],
+  },
+  {
+    // The Workers runtime rejects redirect: "error"; every outbound call to Google failed in production (3 Nov 2026).
+    id: "egress-redirect-mode-runtime",
+    file: "src/net/egress.ts",
+    find: 'const safeInit: RequestInit = { ...init, redirect: "manual" };',
+    replace: 'const safeInit: RequestInit = { ...init, redirect: "error" };',
+    projects: ["worker"],
+  },
+  {
+    // A followed redirect could carry a request off the allowlist.
+    id: "egress-redirect-refused",
+    file: "src/net/egress.ts",
+    find: 'if (res.status >= 300 && res.status < 400) throw new EgressDeniedError("redirect refused", url);',
+    replace: "void EgressDeniedError;",
+    projects: ["unit"],
+  },
+  {
+    // An expired grant, token or sign-in transaction must read as absent.
+    id: "store-expired-rows",
+    file: "src/store/oauth-store.ts",
+    find: "if (row.expiration !== null && row.expiration <= this.nowSeconds()) {",
+    replace: "if (false) {",
+    projects: ["worker"],
+  },
+  {
     id: "egress-allowlist",
     file: "src/net/egress.ts",
     find: 'if (prefixes === undefined) throw new EgressDeniedError("host not allowlisted", url);',

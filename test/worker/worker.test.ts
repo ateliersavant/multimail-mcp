@@ -5,6 +5,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { randomToken, sha256b64url } from "../../src/auth/encoding.js";
 import { loadConfig } from "../../src/config.js";
 import { buildProviderOptions } from "../../src/oauth/options.js";
+import { withConsistentStore } from "../../src/store/env.js";
 
 const ORIGIN = "https://mcp.example.test";
 type Fetcher = { fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> };
@@ -85,9 +86,10 @@ describe("consent page through the real provider", () => {
 
 /** Mints a grant the way /callback does after Google, then exchanges the code at the real token endpoint. */
 async function tokenFor(email: string, resource = `${ORIGIN}/mcp`): Promise<{ status: number; token?: string }> {
-  const cfg = loadConfig(env);
+  const storeEnv = withConsistentStore(env);
+  const cfg = loadConfig(storeEnv);
   const noop = { fetch: async () => new Response(null, { status: 500 }) };
-  const api = getOAuthApi(buildProviderOptions(cfg, { api: noop, pages: noop }), env);
+  const api = getOAuthApi(buildProviderOptions(cfg, { api: noop, pages: noop }), storeEnv);
   const client = await api.createClient({ redirectUris: ["https://client.example.test/cb"], clientName: "E2E", tokenEndpointAuthMethod: "none" });
   const verifier = randomToken();
   const request = { responseType: "code", clientId: client.clientId, redirectUri: "https://client.example.test/cb", scope: ["mail"], state: "st", codeChallenge: await sha256b64url(verifier), codeChallengeMethod: "S256", resource };
@@ -95,8 +97,9 @@ async function tokenFor(email: string, resource = `${ORIGIN}/mcp`): Promise<{ st
   try {
     const { redirectTo } = await api.completeAuthorization({ request, userId: `sub-${email}`, metadata: {}, scope: ["mail"], props: { email, sub: `sub-${email}` } });
     code = new URL(redirectTo).searchParams.get("code");
-  } catch {
-    return { status: 0 };
+  } catch (e) {
+    if (resource !== `${ORIGIN}/mcp` && e instanceof Error && e.name === "AuthorizationError") return { status: 0 }; // unknown resource refused up front
+    throw new Error(`completeAuthorization failed: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`);
   }
   const r = await call("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code: code ?? "", redirect_uri: "https://client.example.test/cb", client_id: client.clientId, code_verifier: verifier, resource }) });
   if (r.status !== 200) return { status: r.status };

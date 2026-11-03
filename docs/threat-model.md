@@ -1,6 +1,6 @@
 # Threat model (one page)
 
-Scope: the Worker, its OAuth layer, its KV state, the Google credentials it holds, and the clients that call it. Out of scope: Google's own infrastructure, the end user's device, and the clients' internal security.
+Scope: the Worker, its OAuth layer, its Durable Object state, the Google credentials it holds, and the clients that call it. Out of scope: Google's own infrastructure, the end user's device, and the clients' internal security.
 
 ## Assets
 

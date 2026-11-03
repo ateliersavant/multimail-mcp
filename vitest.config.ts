@@ -17,7 +17,6 @@ export default defineConfig({
           cloudflareTest({
             wrangler: { configPath: "./wrangler.jsonc" },
             miniflare: {
-              kvNamespaces: ["OAUTH_KV"],
               bindings: {
                 PUBLIC_URL: "https://mcp.example.test",
                 ALLOWED_PRINCIPALS: "ada@example-studio.test",

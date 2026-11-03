@@ -41,18 +41,21 @@ export function assertEgressAllowed(url: URL, policy: EgressPolicy): void {
   if (!prefixes.some(matches)) throw new EgressDeniedError("path not allowlisted", url);
 }
 
+/** Called through the global object: the Workers runtime rejects a detached `fetch` reference. */
+const runtimeFetch: FetchLike = (input, init) => fetch(input, init);
+
 /**
- * Wraps a fetch so that every call is checked against `policy`. Redirects are turned into
- * errors rather than followed. The returned function is what the rest of the code imports as `fetch`.
+ * Wraps a fetch so that every call is checked against `policy`, and refuses redirects.
+ * The Workers runtime only supports `redirect: "follow" | "manual"` ("error" throws), so the wrapper asks for
+ * "manual" and turns any 3xx response into an EgressDeniedError: a followed redirect could leave the allowlist.
  */
-export function createEgressFetch(policy: EgressPolicy, underlying: FetchLike = globalThis.fetch): FetchLike {
+export function createEgressFetch(policy: EgressPolicy, underlying: FetchLike = runtimeFetch): FetchLike {
   return async (input, init) => {
     const url = toUrl(input);
     assertEgressAllowed(url, policy);
-    const safeInit: RequestInit = { ...init, redirect: "error" };
-    if (input instanceof Request) {
-      return underlying(new Request(input, safeInit));
-    }
-    return underlying(url.toString(), safeInit);
+    const safeInit: RequestInit = { ...init, redirect: "manual" };
+    const res = input instanceof Request ? await underlying(new Request(input, safeInit)) : await underlying(url.toString(), safeInit);
+    if (res.status >= 300 && res.status < 400) throw new EgressDeniedError("redirect refused", url);
+    return res;
   };
 }

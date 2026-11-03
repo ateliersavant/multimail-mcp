@@ -4,13 +4,16 @@
  */
 import { AuthorizationError, authorizationErrorRedirect, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import type { Audit } from "../audit.js";
-import { GoogleJwks, SignInError, beginGoogleSignIn, completeGoogleSignIn } from "../auth/google.js";
+import { GOOGLE_AUTHORIZATION_ENDPOINT, GoogleJwks, SignInError, beginGoogleSignIn, completeGoogleSignIn } from "../auth/google.js";
 import { isAllowedPrincipal } from "../auth/principals.js";
 import { getConfig, type ConfigEnv } from "../config.js";
-import type { FetchLike } from "../net/egress.js";
+import { EgressDeniedError, type FetchLike } from "../net/egress.js";
 import { escapeHtml, page } from "./html.js";
 
 export type HandlerEnv = ConfigEnv & { readonly OAUTH_PROVIDER: OAuthHelpers };
+
+/** Where "Continue with Google" lands after the consent POST; must be allowed by the page's form-action. */
+const GOOGLE_SIGN_IN_ORIGIN = new URL(GOOGLE_AUTHORIZATION_ENDPOINT).origin;
 
 interface UpstreamData {
   readonly codeVerifier: string;
@@ -54,7 +57,15 @@ export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request:
   <button class="primary" name="decision" value="approve">Continue with Google</button>
   <button name="decision" value="deny">Deny</button>
 </form>`;
-    return page("Connect a client", body, 200, consent.headers);
+    let clientOrigin: string | undefined;
+    try {
+      const o = new URL(desc.redirectUri).origin;
+      if (o !== "null") clientOrigin = o;
+    } catch {
+      clientOrigin = undefined;
+    }
+    const formActions = [GOOGLE_SIGN_IN_ORIGIN, ...(clientOrigin !== undefined ? [clientOrigin] : [])];
+    return page("Connect a client", body, 200, consent.headers, { formActions });
   }
 
   async function authorizePost(request: Request, env: HandlerEnv): Promise<Response> {
@@ -120,7 +131,11 @@ export function createDefaultHandler(deps: DefaultHandlerDeps): { fetch(request:
     try {
       principal = await completeGoogleSignIn(cfg.google, { code, codeVerifier: data.codeVerifier, nonce: data.nonce }, { fetch: deps.fetch, jwks, now });
     } catch (e) {
-      const errorCode = e instanceof SignInError ? e.code : "sign_in_failed";
+      const errorCode = e instanceof SignInError ? e.code : e instanceof EgressDeniedError ? "egress_denied" : "sign_in_failed";
+      if (!(e instanceof SignInError)) {
+        // Unexpected failure: log its type and the runtime's message (infrastructure text, never mail content).
+        console.error(JSON.stringify({ sign_in_exception: e instanceof Error ? e.name : typeof e, detail: e instanceof Error ? e.message.slice(0, 200) : undefined }));
+      }
       await deps.audit.record({ tool: "authorize", outcome: "error", errorCode, clientId: original.clientId });
       return redirectWithError("server_error", "Google sign-in could not be verified");
     }
